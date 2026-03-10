@@ -1,0 +1,515 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <!-- Google tag (gtag.js) -->
+    <script async src="https://www.googletagmanager.com/gtag/js?id=G-FKL0PZPXZL"></script>
+    <script>
+      window.dataLayer = window.dataLayer || [];
+      function gtag(){dataLayer.push(arguments);}
+      gtag("js", new Date());
+      gtag("config", "G-FKL0PZPXZL");
+    </script>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Architecture - How Certstream Server Works</title>
+    <meta name="description" content="Technical architecture of certstream-server-rust. Learn how CT logs are fetched, certificates are parsed, and data flows to WebSocket and SSE clients.">
+    <meta name="robots" content="index, follow">
+    <link rel="canonical" href="https://certstream.dev/architecture.html">
+    <meta property="og:type" content="website">
+    <meta property="og:url" content="https://certstream.dev/architecture.html">
+    <meta property="og:title" content="Certstream Architecture - Technical Deep Dive">
+    <meta property="og:description" content="How certstream-server-rust works internally. CT log polling, certificate parsing, and real-time streaming architecture.">
+    <meta name="theme-color" content="#b7410e">
+    <link rel="icon" type="image/svg+xml" href="favicon.svg">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="styles.css">
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+    <style>
+        .mermaid {
+            display: flex;
+            justify-content: center;
+            margin: 32px 0;
+        }
+        .mermaid svg {
+            max-width: 100%;
+        }
+        .step-list {
+            counter-reset: step;
+            list-style: none;
+            padding: 0;
+            max-width: 700px;
+            margin: 0 auto;
+        }
+        .step-list li {
+            counter-increment: step;
+            padding: 16px 16px 16px 56px;
+            position: relative;
+            border-left: 2px solid #333;
+            margin-left: 16px;
+        }
+        .step-list li:last-child {
+            border-left-color: transparent;
+        }
+        .step-list li::before {
+            content: counter(step);
+            position: absolute;
+            left: -17px;
+            top: 16px;
+            width: 32px;
+            height: 32px;
+            background: #b7410e;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 600;
+            font-size: 14px;
+        }
+        .step-list li h4 {
+            margin: 0 0 8px 0;
+            color: #fff;
+        }
+        .step-list li p {
+            margin: 0;
+            color: #999;
+        }
+        .info-box {
+            background: #1a1a1a;
+            border: 1px solid #333;
+            border-radius: 8px;
+            padding: 20px 24px;
+            margin: 24px auto;
+            max-width: 800px;
+        }
+        .info-box h4 {
+            margin: 0 0 12px 0;
+            color: #4ade80;
+        }
+        .info-box p {
+            margin: 0;
+            color: #999;
+            line-height: 1.6;
+        }
+        .info-box code {
+            background: #0d0d0d;
+            padding: 2px 6px;
+            border-radius: 4px;
+            color: #60a5fa;
+        }
+        .format-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 16px;
+            margin: 24px 0;
+        }
+        .format-card {
+            background: #1a1a1a;
+            border: 1px solid #333;
+            border-radius: 8px;
+            padding: 20px;
+        }
+        .format-card h4 {
+            margin: 0 0 8px 0;
+            color: #4ade80;
+            font-family: 'IBM Plex Mono', monospace;
+        }
+        .format-card .endpoint {
+            color: #60a5fa;
+            font-family: 'IBM Plex Mono', monospace;
+            font-size: 13px;
+            margin-bottom: 8px;
+        }
+        .format-card p {
+            margin: 0;
+            color: #999;
+            font-size: 14px;
+        }
+        .format-card .size {
+            margin-top: 8px;
+            color: #666;
+            font-size: 12px;
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <div class="wrap">
+            <a href="/" class="logo"><img src="logo.png" alt="Certstream" style="height:28px;width:auto;display:block;">certstream-server-rust</a>
+            <nav>
+                <ul class="nav-links">
+                    <li><a href="/">Home</a></li>
+                    <li><a href="docs.html">API Docs</a></li>
+                    <li><a href="quickstart.html">Quick Start</a></li>
+                    <li><a href="architecture.html" class="active">Architecture</a></li>
+                </ul>
+            </nav>
+            <button class="mobile-menu-btn" onclick="document.getElementById('mobile-nav').classList.add('active')"><span></span><span></span><span></span></button>
+            <a href="https://github.com/reloading01/certstream-server-rust" class="gh-link" target="_blank" rel="noopener">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>
+                GitHub
+            </a>
+        </div>
+    </header>
+    <div class="mobile-nav" id="mobile-nav">
+        <div class="mobile-nav-header">
+            <a href="/" class="logo"><img src="logo.png" alt="Certstream" style="height:28px;width:auto;display:block;">certstream-server-rust</a>
+            <button class="mobile-nav-close" onclick="document.getElementById('mobile-nav').classList.remove('active')">&times;</button>
+        </div>
+        <ul class="mobile-nav-links">
+            <li><a href="/">Home</a></li>
+            <li><a href="docs.html">API Docs</a></li>
+            <li><a href="quickstart.html">Quick Start</a></li>
+            <li><a href="architecture.html" class="active">Architecture</a></li>
+            <li><a href="https://github.com/reloading01/certstream-server-rust" target="_blank" rel="noopener">GitHub</a></li>
+        </ul>
+    </div>
+
+    <main>
+        <div class="wrap">
+            <div class="page-header">
+                <h1>How Certstream Works</h1>
+                <p>Technical architecture and data flow</p>
+            </div>
+        </div>
+
+        <section>
+            <div class="wrap">
+                <div class="section-header">
+                    <h2>High-Level Architecture</h2>
+                    <p>End-to-end data flow from CT logs to clients</p>
+                </div>
+                <div class="mermaid">
+flowchart LR
+    CT["49+ RFC 6962\nCT Logs"] --> W["RFC 6962\nWatchers"]
+    SCT["Static CT Logs\n(Willow, Sycamore)"] --> SW["Static CT\nWatchers"]
+    W --> P["Parser"]
+    SW --> P
+    P --> D["Dedup Filter"]
+    D --> S["Pre-Serialize\n(simd-json)"]
+    S --> B["Arc&lt;PreSerializedMessage&gt;\nBroadcast"]
+    B --> WS["WebSocket"]
+    B --> SSE["SSE"]
+
+    style CT fill:#1a1a1a,stroke:#4ade80,color:#fff
+    style SCT fill:#1a1a1a,stroke:#a78bfa,color:#fff
+    style W fill:#1a1a1a,stroke:#60a5fa,color:#fff
+    style SW fill:#1a1a1a,stroke:#a78bfa,color:#fff
+    style P fill:#1a1a1a,stroke:#60a5fa,color:#fff
+    style D fill:#1a1a1a,stroke:#f59e0b,color:#fff
+    style S fill:#1a1a1a,stroke:#f97316,color:#fff
+    style B fill:#1a1a1a,stroke:#f97316,color:#fff
+    style WS fill:#1a1a1a,stroke:#4ade80,color:#fff
+    style SSE fill:#1a1a1a,stroke:#4ade80,color:#fff
+                </div>
+                <div class="info-box">
+                    <h4>v1.3.0: Zero-Copy &amp; Lock-Free Pipeline</h4>
+                    <p>
+                        Every certificate is serialized exactly once using <code>simd-json</code> (SIMD-accelerated, enabled by default) into three pre-built <code>Bytes</code> payloads
+                        (<code>full</code>, <code>lite</code>, <code>domains_only</code>), then wrapped in an <code>Arc&lt;PreSerializedMessage&gt;</code>.
+                        Each subscriber receives only a pointer clone — no re-serialization, no extra heap allocation per client.
+                        Shared state uses lock-free <code>DashMap</code> throughout; there are no global read/write mutexes in the hot path.
+                        The result is a flat ~150 MB RSS footprint under sustained load, stable over time.
+                    </p>
+                </div>
+            </div>
+        </section>
+
+        <section>
+            <div class="wrap">
+                <div class="section-header">
+                    <h2>CT Log Polling</h2>
+                    <p>How certificates are fetched from Certificate Transparency logs</p>
+                </div>
+                <ol class="step-list">
+                    <li>
+                        <h4>Fetch log list</h4>
+                        <p>On startup, fetches the official CT log list from Google's <code>all_logs_list.json</code>. Filters to only "usable" logs. Merges with custom logs from config.</p>
+                    </li>
+                    <li>
+                        <h4>Spawn watchers</h4>
+                        <p>Each CT log gets its own async task (tokio spawn). Tasks run independently. If state file exists, resumes from saved position.</p>
+                    </li>
+                    <li>
+                        <h4>Poll tree size</h4>
+                        <p>Watcher calls <code>/ct/v1/get-sth</code> to get current tree size. Compares with tracked position to determine new entries.</p>
+                    </li>
+                    <li>
+                        <h4>Fetch entries</h4>
+                        <p>Fetches batch via <code>/ct/v1/get-entries?start=X&end=Y</code>. Batch size configurable (default: 256).</p>
+                    </li>
+                    <li>
+                        <h4>Health tracking</h4>
+                        <p>Tracks consecutive failures. States: Healthy, Degraded, Unhealthy. Unhealthy logs pause with exponential backoff.</p>
+                    </li>
+                    <li>
+                        <h4>Save state</h4>
+                        <p>After each batch, saves position to state file. Enables resume after restart.</p>
+                    </li>
+                </ol>
+            </div>
+        </section>
+
+        <section>
+            <div class="wrap">
+                <div class="section-header">
+                    <h2>Static CT Protocol</h2>
+                    <p>Checkpoint + tile-based fetching for next-generation CT logs (v1.3.0)</p>
+                </div>
+                <div class="info-box">
+                    <h4>Why Static CT?</h4>
+                    <p>
+                        Let's Encrypt is shutting down RFC 6962 CT logs on February 28, 2026. New logs use a static, tile-based protocol
+                        where the tree is served as immutable tiles instead of dynamic <code>get-entries</code> API calls.
+                        Chrome accepts static-ct-api logs since April 2025.
+                    </p>
+                </div>
+                <ol class="step-list">
+                    <li>
+                        <h4>Fetch checkpoint</h4>
+                        <p>Polls <code>/checkpoint</code> to get current tree size. Checkpoints are signed text files with origin, tree size, and root hash.</p>
+                    </li>
+                    <li>
+                        <h4>Calculate tile range</h4>
+                        <p>Each tile contains 256 entries. Calculates which tiles need fetching based on current index vs tree size. Supports partial tiles for the last tile.</p>
+                    </li>
+                    <li>
+                        <h4>Fetch tile data</h4>
+                        <p>Downloads tile from <code>/tile/data/&lt;path&gt;</code>. Path uses hierarchical encoding (e.g., <code>x001/234</code> for tile 1234). Tiles may be gzip-compressed.</p>
+                    </li>
+                    <li>
+                        <h4>Parse binary entries</h4>
+                        <p>Binary parser extracts timestamp, entry type (x509/precert), DER certificate, and chain fingerprints from each 256-entry tile.</p>
+                    </li>
+                    <li>
+                        <h4>Fetch issuer certificates</h4>
+                        <p>Chain certificates are referenced by SHA-256 fingerprint. Fetched from <code>/issuer/&lt;hex&gt;</code> and cached in a DashMap-based issuer cache.</p>
+                    </li>
+                    <li>
+                        <h4>Dedup and broadcast</h4>
+                        <p>Certificates pass through cross-log dedup filter before being serialized and broadcast to clients.</p>
+                    </li>
+                </ol>
+            </div>
+        </section>
+
+        <section>
+            <div class="wrap">
+                <div class="section-header">
+                    <h2>Cross-Log Deduplication</h2>
+                    <p>Filter duplicate certificates across multiple CT logs (v1.3.0)</p>
+                </div>
+                <div class="mermaid">
+flowchart LR
+    A["Certificate"] --> B["SHA-256 Hash"]
+    B --> C{"DedupFilter"}
+    C -->|New| D["Broadcast"]
+    C -->|Duplicate| E["Discard"]
+
+    style A fill:#1a1a1a,stroke:#4ade80,color:#fff
+    style B fill:#1a1a1a,stroke:#60a5fa,color:#fff
+    style C fill:#1a1a1a,stroke:#f59e0b,color:#fff
+    style D fill:#1a1a1a,stroke:#4ade80,color:#fff
+    style E fill:#1a1a1a,stroke:#ef4444,color:#fff
+                </div>
+                <div class="info-box">
+                    <h4>How It Works</h4>
+                    <p>
+                        The same certificate often appears in multiple CT logs simultaneously. The dedup filter uses a <code>DashMap&lt;[u8; 32], Instant&gt;</code>
+                        keyed by the raw 32-byte SHA-256 digest stored directly in <code>LeafCert::sha256_raw</code> — a fixed-size, stack-allocated key that
+                        eliminates one heap allocation per lookup compared to a <code>String</code> key. First occurrence passes through; duplicates within the
+                        5-minute TTL window are discarded. Capacity is capped at 500K entries. A background task cleans expired entries every 60 seconds.
+                    </p>
+                </div>
+            </div>
+        </section>
+
+        <section>
+            <div class="wrap">
+                <div class="section-header">
+                    <h2>Certificate Parsing</h2>
+                    <p>X.509 certificate decoding flow</p>
+                </div>
+                <div class="mermaid">
+flowchart LR
+    A["CT Entry"] --> B["Base64"]
+    B --> C["MerkleTreeLeaf"]
+    C --> D["x509_parser"]
+    D --> E["Extract"]
+
+    style A fill:#1a1a1a,stroke:#60a5fa,color:#fff
+    style B fill:#1a1a1a,stroke:#f97316,color:#fff
+    style C fill:#1a1a1a,stroke:#f97316,color:#fff
+    style D fill:#1a1a1a,stroke:#f97316,color:#fff
+    style E fill:#1a1a1a,stroke:#4ade80,color:#fff
+                </div>
+                <div class="info-box">
+                    <h4>MerkleTreeLeaf Structure (RFC 6962)</h4>
+                    <p>
+                        <code>Byte 0</code> Version |
+                        <code>Byte 1</code> LeafType |
+                        <code>Byte 2-9</code> Timestamp |
+                        <code>Byte 10-11</code> EntryType (0=X509, 1=Precert) |
+                        <code>Byte 12-14</code> Cert length |
+                        <code>Byte 15+</code> DER certificate
+                    </p>
+                </div>
+                <div class="info-box">
+                    <h4>Precert extra_data (RFC 6962)</h4>
+                    <p>
+                        <code>3 bytes</code> pre-certificate length |
+                        <code>variable</code> pre-certificate (X509 with CT poison extension) |
+                        <code>3 bytes</code> chain length |
+                        <code>variable</code> certificate chain
+                    </p>
+                </div>
+                <div class="info-box">
+                    <h4>Extracted Fields</h4>
+                    <p>
+                        <strong>Subject/Issuer:</strong> CN, O, C, L, ST, OU, Email<br>
+                        <strong>Hashes:</strong> SHA1, SHA256, Fingerprint<br>
+                        <strong>Validity:</strong> not_before, not_after<br>
+                        <strong>Extensions:</strong> SubjectAltName, KeyUsage, BasicConstraints<br>
+                        <strong>Domains:</strong> Collected from CN + SAN DNS entries
+                    </p>
+                </div>
+            </div>
+        </section>
+
+        <section>
+            <div class="wrap">
+                <div class="section-header">
+                    <h2>Pre-Serialization</h2>
+                    <p>Serialize once, broadcast to all clients</p>
+                </div>
+                <div class="mermaid">
+flowchart LR
+    A["Message"] --> B["serialize()"]
+    B --> C["Arc"]
+    C --> D["broadcast"]
+    D --> E["Clients"]
+
+    style A fill:#1a1a1a,stroke:#4ade80,color:#fff
+    style B fill:#1a1a1a,stroke:#f97316,color:#fff
+    style C fill:#1a1a1a,stroke:#60a5fa,color:#fff
+    style D fill:#1a1a1a,stroke:#60a5fa,color:#fff
+    style E fill:#1a1a1a,stroke:#4ade80,color:#fff
+                </div>
+                <div class="info-box">
+                    <h4>Why Pre-Serialize? (Serialize-Once, Broadcast-Many)</h4>
+                    <p>
+                        Instead of serializing each message for every connected client, certstream-server-rust serializes once per certificate into three pre-built
+                        byte payloads (<code>full</code>, <code>lite</code>, <code>domains_only</code>), wraps them in an <code>Arc&lt;PreSerializedMessage&gt;</code>,
+                        and clones only the Arc pointer to every subscriber — zero re-serialization, zero extra heap allocation per client.
+                        JSON serialization uses <code>simd-json</code> (SIMD-accelerated) when the <code>simd</code> feature is enabled (the default).
+                        With 10,000 clients, this means 1 serialization instead of 10,000. The broadcast channel uses backpressure — lagging clients
+                        skip messages rather than blocking others.
+                    </p>
+                </div>
+            </div>
+        </section>
+
+        <section>
+            <div class="wrap">
+                <div class="section-header">
+                    <h2>Stream Formats</h2>
+                    <p>Three output formats for different use cases</p>
+                </div>
+                <div class="format-grid">
+                    <div class="format-card">
+                        <h4>full</h4>
+                        <div class="endpoint">/full-stream</div>
+                        <p>Complete certificate data including chain and DER-encoded certificate.</p>
+                        <div class="size">~15-50 KB per message</div>
+                    </div>
+                    <div class="format-card">
+                        <h4>lite</h4>
+                        <div class="endpoint">/ (default)</div>
+                        <p>Certificate metadata without chain or DER data. Best for most use cases.</p>
+                        <div class="size">~2-5 KB per message</div>
+                    </div>
+                    <div class="format-card">
+                        <h4>domains_only</h4>
+                        <div class="endpoint">/domains-only</div>
+                        <p>Just the domain names array. Minimal bandwidth.</p>
+                        <div class="size">~100-500 bytes per message</div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section>
+            <div class="wrap">
+                <div class="section-header">
+                    <h2>State Persistence</h2>
+                    <p>Resume from last position after restart</p>
+                </div>
+                <div class="mermaid">
+flowchart LR
+    A["StateManager"] --> B["DashMap"]
+    B --> C["state.json"]
+    C --> D["Resume"]
+
+    style A fill:#1a1a1a,stroke:#4ade80,color:#fff
+    style B fill:#1a1a1a,stroke:#60a5fa,color:#fff
+    style C fill:#1a1a1a,stroke:#60a5fa,color:#fff
+    style D fill:#1a1a1a,stroke:#4ade80,color:#fff
+                </div>
+                <div class="info-box">
+                    <h4>State Structure</h4>
+                    <p>
+                        Each CT log's state is tracked with: <code>current_index</code> (last processed entry),
+                        <code>tree_size</code> (known tree size), and <code>last_success</code> (timestamp for health tracking).
+                        State is persisted periodically (every 30s) and on shutdown to JSON file, enabling zero-loss restarts.
+                        Both RFC 6962 and static CT log positions are tracked.
+                    </p>
+                </div>
+                <div class="info-box">
+                    <h4>Atomic Dirty Flag (v1.3.0)</h4>
+                    <p>
+                        The dirty flag uses <code>AtomicBool</code> instead of a lock, ensuring state updates are never silently dropped.
+                        State is flushed on graceful shutdown (SIGINT/SIGTERM) and when the periodic save task is cancelled.
+                        Enabled by default with <code>state_file: "certstream_state.json"</code>.
+                    </p>
+                </div>
+            </div>
+        </section>
+
+    </main>
+
+    <footer>
+        <div class="wrap">
+            <div class="links">
+                <a href="https://github.com/reloading01/certstream-server-rust" target="_blank" rel="noopener">GitHub</a>
+                <a href="https://github.com/reloading01/certstream-server-rust/pkgs/container/certstream-server-rust" target="_blank" rel="noopener">GitHub Container Registry</a>
+                <a href="docs.html">Documentation</a>
+                <a href="https://github.com/reloading01/certstream-server-rust/issues" target="_blank" rel="noopener">Issues</a>
+                <a href="https://github.com/reloading01/certstream-server-rust/blob/main/LICENSE" target="_blank" rel="noopener">MIT License</a>
+                <a href="https://certstream.instatus.com" target="_blank" rel="noopener">Status</a>
+            </div>
+            <p>certstream-server-rust</p>
+        </div>
+    </footer>
+
+    <script>
+        mermaid.initialize({
+            startOnLoad: true,
+            theme: 'dark',
+            themeVariables: {
+                primaryColor: '#1a1a1a',
+                primaryTextColor: '#fff',
+                primaryBorderColor: '#333',
+                lineColor: '#f97316',
+                secondaryColor: '#1a1a1a',
+                tertiaryColor: '#1a1a1a',
+                fontFamily: 'IBM Plex Sans'
+            },
+            flowchart: {
+                curve: 'basis',
+                padding: 20
+            }
+        });
+    </script>
+</body>
+</html>

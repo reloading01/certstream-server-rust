@@ -1,0 +1,637 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <!-- Google tag (gtag.js) -->
+    <script async src="https://www.googletagmanager.com/gtag/js?id=G-FKL0PZPXZL"></script>
+    <script>
+      window.dataLayer = window.dataLayer || [];
+      function gtag(){dataLayer.push(arguments);}
+      gtag("js", new Date());
+      gtag("config", "G-FKL0PZPXZL");
+    </script>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Certstream Server Rust - Real-Time Certificate Transparency Log Streaming</title>
+    <meta name="description" content="Certstream server written in Rust for real-time SSL/TLS certificate streaming. Aggregates certificates from 60+ CT logs via WebSocket and SSE. Drop-in replacement for certstream-server and certstream-server-go. ~150MB stable RSS, 50K+ concurrent clients.">
+    <meta name="keywords" content="certstream, certstream server, certstream rust, certstream-server-rust, certificate transparency, CT logs, SSL certificates, TLS certificates, real-time streaming, websocket, sse, rust server">
+    <meta name="author" content="reloading01">
+    <meta name="robots" content="index, follow">
+    <link rel="canonical" href="https://certstream.dev/">
+    <meta property="og:type" content="website">
+    <meta property="og:url" content="https://certstream.dev/">
+    <meta property="og:title" content="Certstream Server Rust - Real-Time Certificate Transparency Streaming">
+    <meta property="og:description" content="Certstream server in Rust for real-time certificate streaming. Aggregates SSL/TLS certs from 60+ CT logs. WebSocket and SSE support. Zero-copy pipeline, flat ~150MB RSS.">
+    <meta property="og:site_name" content="certstream-server-rust">
+    <meta name="twitter:card" content="summary_large_image">
+    <meta name="twitter:title" content="Certstream Server Rust - Real-Time Certificate Streaming">
+    <meta name="twitter:description" content="Stream SSL/TLS certificates from 60+ CT logs in real-time. WebSocket and SSE. ~150MB stable RSS, 50K+ concurrent clients. Zero-copy pipeline. Drop-in replacement for certstream-server-go.">
+    <meta name="theme-color" content="#b7410e">
+    <link rel="icon" type="image/svg+xml" href="favicon.svg">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="styles.css">
+    <script type="application/ld+json">
+    {
+        "@context": "https://schema.org",
+        "@type": "WebAPI",
+        "name": "Certstream Public API",
+        "description": "Free public certstream API for real-time Certificate Transparency log streaming. Connect via WebSocket or SSE to receive SSL/TLS certificates as they are issued.",
+        "url": "https://certstream.dev/docs.html",
+        "documentation": "https://certstream.dev/docs.html",
+        "termsOfService": "https://certstream.dev/docs.html",
+        "provider": {
+            "@type": "Person",
+            "name": "reloading01",
+            "url": "https://github.com/reloading01"
+        },
+        "offers": {
+            "@type": "Offer",
+            "price": "0",
+            "priceCurrency": "USD"
+        },
+        "serviceEndpoint": [
+            {
+                "@type": "EntryPoint",
+                "urlTemplate": "wss://api.certstream.dev/",
+                "description": "WebSocket lite stream — real-time SSL/TLS certificate transparency feed"
+            },
+            {
+                "@type": "EntryPoint",
+                "urlTemplate": "wss://api.certstream.dev/full-stream",
+                "description": "WebSocket full stream with DER and certificate chain"
+            },
+            {
+                "@type": "EntryPoint",
+                "urlTemplate": "wss://api.certstream.dev/domains-only",
+                "description": "WebSocket domains-only stream"
+            },
+            {
+                "@type": "EntryPoint",
+                "urlTemplate": "https://api.certstream.dev/sse",
+                "description": "Server-Sent Events certificate transparency stream"
+            }
+        ]
+    }
+    </script>
+    <script type="application/ld+json">
+    {
+        "@context": "https://schema.org",
+        "@type": "SoftwareApplication",
+        "name": "certstream-server-rust",
+        "description": "High-performance Certificate Transparency log streaming server written in Rust",
+        "url": "https://certstream.dev/",
+        "applicationCategory": "SecurityApplication",
+        "operatingSystem": "Linux, macOS, Windows",
+        "offers": {
+            "@type": "Offer",
+            "price": "0",
+            "priceCurrency": "USD"
+        },
+        "aggregateRating": {
+            "@type": "AggregateRating",
+            "ratingValue": "5",
+            "ratingCount": "12",
+            "bestRating": "5",
+            "worstRating": "1"
+        },
+        "author": {
+            "@type": "Person",
+            "name": "reloading01",
+            "url": "https://github.com/reloading01"
+        },
+        "codeRepository": "https://github.com/reloading01/certstream-server-rust",
+        "programmingLanguage": "Rust",
+        "license": "https://opensource.org/licenses/MIT"
+    }
+    </script>
+    <script type="application/ld+json">
+    {
+        "@context": "https://schema.org",
+        "@type": "FAQPage",
+        "mainEntity": [
+            {
+                "@type": "Question",
+                "name": "What is Certstream?",
+                "acceptedAnswer": {
+                    "@type": "Answer",
+                    "text": "Certstream is a service that aggregates certificates from Certificate Transparency logs and streams them in real-time. It provides a firehose of newly issued SSL/TLS certificates that developers can filter and process."
+                }
+            },
+            {
+                "@type": "Question",
+                "name": "How is certstream-server-rust different from certstream-server-go?",
+                "acceptedAnswer": {
+                    "@type": "Answer",
+                    "text": "certstream-server-rust v1.3.1 maintains a flat ~150MB RSS under sustained load (vs ~254MB for Go), delivers lower latency via a zero-copy broadcast pipeline, and supports SSE in addition to WebSocket."
+                }
+            },
+            {
+                "@type": "Question",
+                "name": "What protocols does certstream-server-rust support?",
+                "acceptedAnswer": {
+                    "@type": "Answer",
+                    "text": "certstream-server-rust supports WebSocket and Server-Sent Events (SSE). This allows integration with browsers, command-line tools, and data pipelines."
+                }
+            },
+            {
+                "@type": "Question",
+                "name": "Is there a free certstream API available?",
+                "acceptedAnswer": {
+                    "@type": "Answer",
+                    "text": "Yes. A free public certstream API is available at api.certstream.dev for research and testing. Connect via WebSocket at wss://api.certstream.dev/ or SSE at https://api.certstream.dev/sse. Best-effort service, rate limited, max 10 connections per IP. For production workloads, self-host using the open-source certstream-server-rust."
+                }
+            },
+            {
+                "@type": "Question",
+                "name": "How do I connect to the certstream API?",
+                "acceptedAnswer": {
+                    "@type": "Answer",
+                    "text": "Connect to wss://api.certstream.dev/ via WebSocket, or use `curl -N https://api.certstream.dev/sse` for Server-Sent Events. Python users can use the certstream library: certstream.listen_for_events(callback, url='wss://api.certstream.dev/'). No authentication required."
+                }
+            },
+            {
+                "@type": "Question",
+                "name": "What can I use the certstream API for?",
+                "acceptedAnswer": {
+                    "@type": "Answer",
+                    "text": "Common use cases: phishing domain detection, brand monitoring, security research, threat intelligence, certificate inventory, and discovering newly registered domains. The certstream API streams every newly issued SSL/TLS certificate in real-time from 60+ Certificate Transparency logs."
+                }
+            }
+        ]
+    }
+    </script>
+</head>
+<body>
+    <header>
+        <div class="wrap">
+            <a href="/" class="logo"><img src="logo.png" alt="Certstream" style="height:28px;width:auto;display:block;">certstream-server-rust</a>
+            <nav>
+                <ul class="nav-links">
+                    <li><a href="/" class="active">Home</a></li>
+                    <li><a href="docs.html">API Docs</a></li>
+                    <li><a href="quickstart.html">Quick Start</a></li>
+                    <li><a href="architecture.html">Architecture</a></li>
+                </ul>
+            </nav>
+            <button class="mobile-menu-btn" onclick="document.getElementById('mobile-nav').classList.add('active')"><span></span><span></span><span></span></button>
+            <a href="https://github.com/reloading01/certstream-server-rust" class="gh-link" target="_blank" rel="noopener">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>
+                GitHub
+            </a>
+        </div>
+    </header>
+    <div class="mobile-nav" id="mobile-nav">
+        <div class="mobile-nav-header">
+            <a href="/" class="logo"><img src="logo.png" alt="Certstream" style="height:28px;width:auto;display:block;">certstream-server-rust</a>
+            <button class="mobile-nav-close" onclick="document.getElementById('mobile-nav').classList.remove('active')">&times;</button>
+        </div>
+        <ul class="mobile-nav-links">
+            <li><a href="/" class="active">Home</a></li>
+            <li><a href="docs.html">API Docs</a></li>
+            <li><a href="quickstart.html">Quick Start</a></li>
+            <li><a href="architecture.html">Architecture</a></li>
+            <li><a href="https://github.com/reloading01/certstream-server-rust" target="_blank" rel="noopener">GitHub</a></li>
+        </ul>
+    </div>
+
+    <main>
+        <section class="hero">
+            <div class="wrap">
+                <h1><span class="hl">Certstream</span> server in Rust for real-time CT log streaming</h1>
+                <p class="hero-desc">
+                    Drop-in replacement for certstream-server and certstream-server-go. Stream certificates via WebSocket and SSE.
+                    Monitor 60+ Certificate Transparency logs with 50K+ concurrent clients.
+                </p>
+                <div class="hero-stats">
+                    <div class="hero-stat">
+                        <strong>~150 MB</strong>
+                        <span>Memory (stable RSS)</span>
+                    </div>
+                    <div class="hero-stat">
+                        <strong>8.4ms</strong>
+                        <span>Avg latency</span>
+                    </div>
+                    <div class="hero-stat">
+                        <strong>~1K/s</strong>
+                        <span>Sustained ingest</span>
+                    </div>
+                    <div class="hero-stat">
+                        <strong>23%</strong>
+                        <span>CPU (500 clients)</span>
+                    </div>
+                    </div>
+                </div>
+                <div class="hero-actions">
+                    <a href="https://github.com/reloading01/certstream-server-rust#quick-start" class="btn btn-primary" target="_blank" rel="noopener">Get Started</a>
+                    <a href="https://github.com/reloading01/certstream-server-rust" class="btn btn-secondary" target="_blank" rel="noopener">View on GitHub</a>
+                </div>
+                <div class="install-box">
+                    <code>docker run -d -p 8080:8080 ghcr.io/reloading01/certstream-server-rust:latest</code>
+                    <button onclick="navigator.clipboard.writeText('docker run -d -p 8080:8080 ghcr.io/reloading01/certstream-server-rust:latest');this.textContent='Copied!'">Copy</button>
+                </div>
+                <p style="margin-top: 16px; color: #666; font-size: 0.875rem; text-align: center;">
+                    Or try the community endpoint instantly:
+                    <code style="background: #1a1a1a; padding: 2px 8px; border-radius: 4px; color: #60a5fa;">wss://api.certstream.dev/</code>
+                    — best-effort, rate limited, max 10 conn/IP
+                </p>
+            </div>
+        </section>
+
+        <!-- Cert detail modal -->
+        <div id="cert-modal" style="display:none;position:fixed;inset:0;z-index:1000;background:rgba(0,0,0,0.75);backdrop-filter:blur(4px);align-items:center;justify-content:center;padding:20px;">
+            <div style="background:#111;border:1px solid #2a2a2a;border-radius:12px;width:100%;max-width:680px;max-height:85vh;display:flex;flex-direction:column;overflow:hidden;">
+                <div style="padding:16px 20px;border-bottom:1px solid #1e1e1e;display:flex;align-items:center;justify-content:space-between;flex-shrink:0;">
+                    <span id="modal-title" style="font-family:'IBM Plex Mono',monospace;font-size:0.82rem;color:#60a5fa;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:calc(100% - 40px);"></span>
+                    <button onclick="certModalClose()" style="background:none;border:none;color:#555;font-size:1.4rem;cursor:pointer;line-height:1;flex-shrink:0;padding:0 0 0 12px;">&times;</button>
+                </div>
+                <div id="modal-body" style="overflow-y:auto;padding:20px;display:grid;gap:16px;"></div>
+            </div>
+        </div>
+
+        <section id="live-demo">
+            <div class="wrap">
+                <div class="section-header">
+                    <h2>Live Certificate Stream</h2>
+                    <p>Real-time feed from <code style="background:#1a1a1a;padding:2px 8px;border-radius:4px;color:#60a5fa;font-size:0.85em;">api.certstream.dev</code> — click any row for details</p>
+                </div>
+                <div style="border:1px solid #222;border-radius:10px;overflow:hidden;max-width:900px;margin:0 auto;">
+                    <div style="background:#111;border-bottom:1px solid #222;padding:12px 16px;display:flex;align-items:center;justify-content:space-between;gap:12px;">
+                        <div style="display:flex;align-items:center;gap:10px;">
+                            <span id="demo-dot" style="width:8px;height:8px;border-radius:50%;background:#ef4444;flex-shrink:0;transition:background 0.3s;"></span>
+                            <span id="demo-status-text" style="font-family:'IBM Plex Mono',monospace;font-size:0.78rem;color:#666;">connecting…</span>
+                        </div>
+                        <div style="display:flex;align-items:center;gap:16px;">
+                            <span id="live-connections" style="font-family:'IBM Plex Mono',monospace;font-size:0.78rem;color:#555;" title="Active stream connections">— active <span id="live-conn-dot" style="display:inline-block;width:6px;height:6px;border-radius:50%;background:#555;vertical-align:middle;margin-left:2px;transition:background 0.3s;"></span></span>
+                            <span id="demo-counter" style="font-family:'IBM Plex Mono',monospace;font-size:0.78rem;color:#555;">0 certs</span>
+                            <button id="demo-toggle" onclick="demoToggle()" style="background:#1a1a1a;border:1px solid #333;color:#999;font-size:0.78rem;padding:4px 12px;border-radius:4px;cursor:pointer;font-family:'IBM Plex Mono',monospace;">Pause</button>
+                        </div>
+                    </div>
+                    <div id="demo-feed" style="height:320px;overflow:hidden;position:relative;background:#0a0a0a;">
+                        <div id="demo-inner" style="padding:8px 0;"></div>
+                    </div>
+                    <div style="background:#111;border-top:1px solid #222;padding:8px 16px;">
+                        <span style="font-family:'IBM Plex Mono',monospace;font-size:0.72rem;color:#333;">SSE · api.certstream.dev/sse · best-effort community endpoint</span>
+                    </div>
+                </div>
+            </div>
+        </section>
+        <style>
+            .demo-entry { display:flex; align-items:baseline; gap:10px; padding:4px 16px; font-family:'IBM Plex Mono',monospace; font-size:0.78rem; line-height:1.5; border-bottom:1px solid #0f0f0f; animation:fadeIn 0.25s ease; cursor:pointer; }
+            .demo-entry:hover { background:#111; }
+            .demo-ts { color:#333; flex-shrink:0; font-size:0.7rem; }
+            .demo-issuer { color:#f97316; flex-shrink:0; max-width:120px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+            .demo-domains { color:#e8e8e8; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; flex:1; }
+            .demo-domains span { color:#60a5fa; }
+            .demo-source { color:#333; flex-shrink:0; font-size:0.7rem; max-width:130px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+            .demo-more { color:#555; font-size:0.7rem; flex-shrink:0; }
+            @keyframes fadeIn { from { opacity:0; transform:translateY(-4px); } to { opacity:1; transform:translateY(0); } }
+            .modal-section { background:#0d0d0d; border:1px solid #1e1e1e; border-radius:8px; padding:14px 16px; }
+            .modal-section-title { font-family:'IBM Plex Mono',monospace; font-size:0.7rem; color:#555; text-transform:uppercase; letter-spacing:0.08em; margin-bottom:10px; }
+            .modal-field { display:grid; grid-template-columns:140px 1fr; gap:6px 12px; margin-bottom:6px; font-family:'IBM Plex Mono',monospace; font-size:0.75rem; }
+            .modal-field:last-child { margin-bottom:0; }
+            .modal-key { color:#555; }
+            .modal-val { color:#e8e8e8; word-break:break-all; }
+            .modal-val.hl { color:#60a5fa; }
+            .modal-val.orange { color:#f97316; }
+            .modal-tag { display:inline-block; background:#1a1a1a; border:1px solid #2a2a2a; border-radius:4px; padding:1px 7px; margin:2px 2px 2px 0; font-size:0.72rem; color:#e8e8e8; }
+            #cert-modal.open { display:flex; }
+        </style>
+        <script>
+            var demoEs = null, demoPaused = false, demoCount = 0;
+            var demoCertStore = {};
+
+            function demoStart() {
+                if (demoEs) demoEs.close();
+                demoEs = new EventSource('https://api.certstream.dev/sse');
+                demoEs.onopen = function() {
+                    document.getElementById('demo-dot').style.background = '#4ade80';
+                    document.getElementById('demo-status-text').textContent = 'live';
+                };
+                demoEs.onerror = function() {
+                    document.getElementById('demo-dot').style.background = '#ef4444';
+                    document.getElementById('demo-status-text').textContent = 'reconnecting…';
+                };
+                demoEs.onmessage = function(e) {
+                    if (demoPaused) return;
+                    try {
+                        var msg = JSON.parse(e.data);
+                        if (msg.message_type !== 'certificate_update') return;
+                        var lc = msg.data.leaf_cert;
+                        var domains = lc.all_domains || [];
+                        if (!domains.length) return;
+                        demoCount++;
+                        document.getElementById('demo-counter').textContent = demoCount.toLocaleString() + ' certs';
+                        var ts = new Date();
+                        var hh = String(ts.getHours()).padStart(2,'0');
+                        var mm = String(ts.getMinutes()).padStart(2,'0');
+                        var ss = String(ts.getSeconds()).padStart(2,'0');
+                        var issuerLabel = (lc.issuer && (lc.issuer.O || lc.issuer.CN)) || '?';
+                        var issuerShort = issuerLabel.length > 18 ? issuerLabel.slice(0,16)+'…' : issuerLabel;
+                        var primary = domains[0];
+                        var extra = domains.length > 1 ? domains.length - 1 : 0;
+                        var source = (msg.data.source && msg.data.source.name) || '';
+                        var sourceShort = source.length > 18 ? source.slice(0,16)+'…' : source;
+                        var id = 'c' + demoCount;
+                        demoCertStore[id] = msg.data;
+                        var row = document.createElement('div');
+                        row.className = 'demo-entry';
+                        row.dataset.id = id;
+                        row.innerHTML =
+                            '<span class="demo-ts">' + hh+':'+mm+':'+ss + '</span>' +
+                            '<span class="demo-issuer">' + escHtml(issuerShort) + '</span>' +
+                            '<span class="demo-domains"><span>' + escHtml(primary) + '</span></span>' +
+                            (extra ? '<span class="demo-more">+'+extra+'</span>' : '') +
+                            '<span class="demo-source">' + escHtml(sourceShort) + '</span>';
+                        row.addEventListener('click', function() { certModalOpen(this.dataset.id); });
+                        var inner = document.getElementById('demo-inner');
+                        inner.insertBefore(row, inner.firstChild);
+                        if (inner.children.length > 80) {
+                            var last = inner.lastChild;
+                            if (last && last.dataset && last.dataset.id) delete demoCertStore[last.dataset.id];
+                            inner.removeChild(last);
+                        }
+                    } catch(err) {}
+                };
+            }
+
+            function escHtml(s) {
+                return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+            }
+
+            function fmtDate(ts) {
+                if (!ts) return '—';
+                return new Date(ts * 1000).toISOString().replace('T',' ').slice(0,19) + ' UTC';
+            }
+
+            function certModalOpen(id) {
+                var d = demoCertStore[id];
+                if (!d) return;
+                var lc = d.leaf_cert;
+                var domains = lc.all_domains || [];
+                document.getElementById('modal-title').textContent = domains[0] || '(unknown)';
+                var body = document.getElementById('modal-body');
+                body.innerHTML = '';
+
+                function section(title, fields) {
+                    var s = document.createElement('div');
+                    s.className = 'modal-section';
+                    var t = document.createElement('div');
+                    t.className = 'modal-section-title';
+                    t.textContent = title;
+                    s.appendChild(t);
+                    fields.forEach(function(f) {
+                        if (!f[1] && f[1] !== 0 && f[1] !== false) return;
+                        var row = document.createElement('div');
+                        row.className = 'modal-field';
+                        var k = document.createElement('span');
+                        k.className = 'modal-key';
+                        k.textContent = f[0];
+                        var v = document.createElement('span');
+                        v.className = 'modal-val' + (f[2] ? ' ' + f[2] : '');
+                        v.textContent = f[1];
+                        row.appendChild(k);
+                        row.appendChild(v);
+                        s.appendChild(row);
+                    });
+                    body.appendChild(s);
+                }
+
+                // Domains
+                var ds = document.createElement('div');
+                ds.className = 'modal-section';
+                var dt = document.createElement('div');
+                dt.className = 'modal-section-title';
+                dt.textContent = 'Domains (' + domains.length + ')';
+                ds.appendChild(dt);
+                var dtags = document.createElement('div');
+                domains.forEach(function(d2) {
+                    var tag = document.createElement('span');
+                    tag.className = 'modal-tag';
+                    tag.textContent = d2;
+                    dtags.appendChild(tag);
+                });
+                ds.appendChild(dtags);
+                body.appendChild(ds);
+
+                // Subject & Issuer
+                var subj = lc.subject || {};
+                var iss = lc.issuer || {};
+                section('Subject', [
+                    ['CN', subj.CN, 'hl'],
+                    ['O', subj.O],
+                    ['C', subj.C],
+                    ['aggregated', subj.aggregated]
+                ]);
+                section('Issuer', [
+                    ['CN', iss.CN, 'orange'],
+                    ['O', iss.O, 'orange'],
+                    ['C', iss.C],
+                    ['aggregated', iss.aggregated]
+                ]);
+
+                // Validity
+                section('Validity', [
+                    ['Not Before', fmtDate(lc.not_before)],
+                    ['Not After', fmtDate(lc.not_after)]
+                ]);
+
+                // Fingerprints
+                section('Fingerprints', [
+                    ['SHA-256', lc.sha256],
+                    ['SHA-1', lc.sha1],
+                    ['Fingerprint', lc.fingerprint],
+                    ['Serial', lc.serial_number],
+                    ['Algorithm', lc.signature_algorithm],
+                    ['Is CA', lc.is_ca !== undefined ? String(lc.is_ca) : null]
+                ]);
+
+                // Extensions
+                var ext = lc.extensions || {};
+                var extFields = Object.keys(ext).map(function(k) { return [k, ext[k]]; });
+                if (extFields.length) section('Extensions', extFields);
+
+                // Source
+                section('Source', [
+                    ['Log', (d.source && d.source.name) || '—'],
+                    ['URL', (d.source && d.source.url) || '—'],
+                    ['Index', d.cert_index !== undefined ? String(d.cert_index) : '—'],
+                    ['Seen', d.seen ? fmtDate(Math.floor(d.seen)) : '—']
+                ]);
+
+                var modal = document.getElementById('cert-modal');
+                modal.classList.add('open');
+                modal.style.display = 'flex';
+            }
+
+            function certModalClose() {
+                var modal = document.getElementById('cert-modal');
+                modal.classList.remove('open');
+                modal.style.display = 'none';
+            }
+
+            document.getElementById('cert-modal').addEventListener('click', function(e) {
+                if (e.target === this) certModalClose();
+            });
+
+            document.addEventListener('keydown', function(e) {
+                if (e.key === 'Escape') certModalClose();
+            });
+
+            function demoToggle() {
+                demoPaused = !demoPaused;
+                var btn = document.getElementById('demo-toggle');
+                var dot = document.getElementById('demo-dot');
+                var txt = document.getElementById('demo-status-text');
+                if (demoPaused) {
+                    btn.textContent = 'Resume';
+                    dot.style.background = '#f59e0b';
+                    txt.textContent = 'paused';
+                } else {
+                    btn.textContent = 'Pause';
+                    dot.style.background = '#4ade80';
+                    txt.textContent = 'live';
+                }
+            }
+
+            demoStart();
+
+            function fetchLiveConnections() {
+                fetch('https://api.certstream.dev/api/stats')
+                    .then(function(r) { return r.json(); })
+                    .then(function(d) {
+                        var n = d.connections && d.connections.total !== undefined ? d.connections.total : null;
+                        if (n !== null) {
+                            document.getElementById('live-connections').childNodes[0].textContent = n.toLocaleString() + ' active ';
+                            document.getElementById('live-conn-dot').style.background = '#4ade80';
+                        }
+                    })
+                    .catch(function() {
+                        document.getElementById('live-conn-dot').style.background = '#ef4444';
+                    });
+            }
+            fetchLiveConnections();
+            setInterval(fetchLiveConnections, 30000);
+        </script>
+
+        <section id="features">
+            <div class="wrap">
+                <div class="section-header">
+                    <h2>What you get</h2>
+                    <p>Built for security teams, researchers, and developers who need reliable CT monitoring</p>
+                </div>
+                <div class="features-list">
+                    <div class="feature-item">
+                        <h3>Multi-protocol streaming</h3>
+                        <p>WebSocket and SSE (Server-Sent Events). Pick the protocol that fits your stack. WebSocket for real-time clients, SSE for browsers and pipelines.</p>
+                    </div>
+                    <div class="feature-item">
+                        <h3>State persistence</h3>
+                        <p>Resume from last position after restart. No certificate loss during maintenance or updates. Configurable state file.</p>
+                    </div>
+                    <div class="feature-item">
+                        <h3>Connection limiting</h3>
+                        <p>Per-IP and total connection limits. Production-ready protection against abuse.</p>
+                    </div>
+                    <div class="feature-item">
+                        <h3>Token authentication</h3>
+                        <p>Bearer token based auth for API access control. Multiple tokens supported. Configurable header name.</p>
+                    </div>
+                    <div class="feature-item">
+                        <h3>Hot reload config</h3>
+                        <p>Config changes apply without restart. File watcher detects updates. Zero-downtime configuration.</p>
+                    </div>
+                    <div class="feature-item">
+                        <h3>CT log health</h3>
+                        <p>Automatic retry with exponential backoff. Circuit breaker for unhealthy logs. Configurable health thresholds.</p>
+                    </div>
+                    <div class="feature-item">
+                        <h3>Prometheus metrics</h3>
+                        <p>Built-in /metrics endpoint. Connection counts per protocol, message throughput, CT log health.</p>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section id="performance">
+            <div class="wrap">
+                <div class="section-header">
+                    <h2>Performance</h2>
+                    <p>Load tested with 500 concurrent WebSocket clients, 60 seconds (2 CPU cores, 2GB RAM per container)</p>
+                </div>
+                <div class="comparison-grid" style="grid-template-columns: 1fr 1fr 1fr 1fr;">
+                    <div class="comparison-cell header"></div>
+                    <div class="comparison-cell header">Rust</div>
+                    <div class="comparison-cell header">Go</div>
+                    <div class="comparison-cell header">Elixir</div>
+                    <div class="comparison-cell label">Memory (idle)</div>
+                    <div class="comparison-cell"><span class="value best">27 MB</span></div>
+                    <div class="comparison-cell"><span class="value">49 MB</span></div>
+                    <div class="comparison-cell"><span class="value">230 MB</span></div>
+                    <div class="comparison-cell label">Memory (under load)</div>
+                    <div class="comparison-cell"><span class="value best">~150 MB</span></div>
+                    <div class="comparison-cell"><span class="value">309 MB</span></div>
+                    <div class="comparison-cell"><span class="value">649 MB</span></div>
+                    <div class="comparison-cell label">CPU (under load)</div>
+                    <div class="comparison-cell"><span class="value best">23%</span></div>
+                    <div class="comparison-cell"><span class="value">72%</span></div>
+                    <div class="comparison-cell"><span class="value">206%</span></div>
+                    <div class="comparison-cell label">Throughput</div>
+                    <div class="comparison-cell"><span class="value best">48.6K/s</span></div>
+                    <div class="comparison-cell"><span class="value">27K/s</span></div>
+                    <div class="comparison-cell"><span class="value">19K/s</span></div>
+                    <div class="comparison-cell label">Avg Latency</div>
+                    <div class="comparison-cell"><span class="value best">8.4ms</span></div>
+                    <div class="comparison-cell"><span class="value">9.2ms</span></div>
+                    <div class="comparison-cell"><span class="value">26.8ms</span></div>
+                    <div class="comparison-cell label">P99 Latency</div>
+                    <div class="comparison-cell"><span class="value best">172ms</span></div>
+                    <div class="comparison-cell"><span class="value">187ms</span></div>
+                    <div class="comparison-cell"><span class="value">297ms</span></div>
+                </div>
+                <p style="margin-top: 24px; color: #666; font-size: 0.85rem; text-align: center;">
+                    Rust vs Elixir: ~4x less memory under load (v1.3.0: flat ~150MB RSS, stable over time), 2.5x higher throughput. Rust vs Go: ~2x less memory, 1.8x higher throughput. v1.3.0 zero-copy pipeline eliminates memory growth under sustained load.
+                </p>
+            </div>
+        </section>
+
+    </main>
+
+        <section id="public-api">
+            <div class="wrap">
+                <div class="section-header">
+                    <h2>Free Certstream API</h2>
+                    <p>Public endpoint for research, testing, and security tooling — no setup required</p>
+                </div>
+                <div class="features-list">
+                    <div class="feature-item">
+                        <h3>WebSocket stream</h3>
+                        <p>Connect to <code>wss://api.certstream.dev/</code> for a real-time feed of every newly issued SSL/TLS certificate. Use <code>/full-stream</code> for DER and chain data, or <code>/domains-only</code> for minimal bandwidth.</p>
+                    </div>
+                    <div class="feature-item">
+                        <h3>SSE stream</h3>
+                        <p>No WebSocket client? Use <code>https://api.certstream.dev/sse</code> — works with <code>curl</code>, browsers, and any HTTP client that supports Server-Sent Events.</p>
+                    </div>
+                    <div class="feature-item">
+                        <h3>Zero setup</h3>
+                        <p>No API key, no registration. Community endpoint. Best-effort, rate limited, max 10 connections per IP. For production, <a href="quickstart.html">self-host in seconds with Docker</a>. Check availability at <a href="https://certstream.instatus.com" target="_blank" rel="noopener">certstream.instatus.com</a>.</p>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+    <footer>
+        <div class="wrap">
+            <div class="links">
+                <a href="https://github.com/reloading01/certstream-server-rust" target="_blank" rel="noopener">GitHub</a>
+                <a href="https://github.com/reloading01/certstream-server-rust/pkgs/container/certstream-server-rust" target="_blank" rel="noopener">GitHub Container Registry</a>
+                <a href="docs.html">Documentation</a>
+                <a href="https://github.com/reloading01/certstream-server-rust/issues" target="_blank" rel="noopener">Issues</a>
+                <a href="https://github.com/reloading01/certstream-server-rust/blob/main/LICENSE" target="_blank" rel="noopener">MIT License</a>
+                <a href="https://certstream.instatus.com" target="_blank" rel="noopener">Status</a>
+            </div>
+            <p>certstream-server-rust</p>
+        </div>
+    </footer>
+</body>
+</html>
