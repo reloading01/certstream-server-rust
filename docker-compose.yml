@@ -1,0 +1,65 @@
+# Usage:
+#   Server only:       docker compose up -d
+#   With monitoring:   docker compose --profile monitoring up -d
+#
+# Monitoring (Prometheus + Grafana) is optional via the "monitoring" profile.
+# Grafana: http://localhost:3000 (admin / certstream)
+# Prometheus: http://localhost:9090
+
+services:
+  certstream-server-rust:
+    build: .
+    ports:
+      - "${PORT:-8080}:${PORT:-8080}"
+    environment:
+      - CERTSTREAM_HOST=${HOST:-0.0.0.0}
+      - CERTSTREAM_PORT=${PORT:-8080}
+      - CERTSTREAM_LOG_LEVEL=${LOG_LEVEL:-info}
+      - CERTSTREAM_BUFFER_SIZE=${BUFFER_SIZE:-1000}
+      - CERTSTREAM_SSE_ENABLED=${SSE_ENABLED:-true}
+    volumes:
+      - ./config.yaml:/etc/certstream/config.yaml:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8080/health/deep"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # Optional: Prometheus metrics collection
+  prometheus:
+    image: prom/prometheus:latest
+    profiles: [monitoring]
+    ports:
+      - "${PROMETHEUS_PORT:-9090}:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    depends_on:
+      certstream-server-rust:
+        condition: service_started
+    restart: unless-stopped
+
+  # Optional: Grafana dashboard
+  grafana:
+    image: grafana/grafana:latest
+    profiles: [monitoring]
+    ports:
+      - "${GRAFANA_PORT:-3000}:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_USER:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-certstream}
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      prometheus:
+        condition: service_started
+    restart: unless-stopped
+
+volumes:
+  prometheus_data:
+  grafana_data:

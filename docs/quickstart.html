@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <!-- Google tag (gtag.js) -->
+    <script async src="https://www.googletagmanager.com/gtag/js?id=G-FKL0PZPXZL"></script>
+    <script>
+      window.dataLayer = window.dataLayer || [];
+      function gtag(){dataLayer.push(arguments);}
+      gtag("js", new Date());
+      gtag("config", "G-FKL0PZPXZL");
+    </script>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Certstream Quick Start - Run Your Own CT Log Server in Seconds</title>
+    <meta name="description" content="Get started with certstream-server-rust in under a minute. Run your own certificate transparency log streaming server with Docker. Connect via Python, JavaScript, or cURL.">
+    <meta name="robots" content="index, follow">
+    <link rel="canonical" href="https://certstream.dev/quickstart.html">
+    <meta property="og:type" content="website">
+    <meta property="og:url" content="https://certstream.dev/quickstart.html">
+    <meta property="og:title" content="Certstream Quick Start - Self-Host CT Log Streaming">
+    <meta property="og:description" content="Run your own certstream server with Docker in seconds. Connect via WebSocket or SSE. Code examples for Python, JavaScript, and cURL.">
+    <meta name="theme-color" content="#b7410e">
+    <link rel="icon" type="image/svg+xml" href="favicon.svg">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="styles.css">
+    <script type="application/ld+json">
+    {
+        "@context": "https://schema.org",
+        "@type": "HowTo",
+        "name": "How to set up certstream-server-rust",
+        "description": "Run your own certificate transparency log streaming server with Docker",
+        "step": [
+            {
+                "@type": "HowToStep",
+                "name": "Run the server",
+                "text": "docker run -d -p 8080:8080 ghcr.io/reloading01/certstream-server-rust:latest"
+            },
+            {
+                "@type": "HowToStep",
+                "name": "Connect via WebSocket",
+                "text": "Connect to ws://localhost:8080/ using Python, JavaScript, or any WebSocket client"
+            }
+        ]
+    }
+    </script>
+</head>
+<body>
+    <header>
+        <div class="wrap">
+            <a href="/" class="logo"><img src="logo.png" alt="Certstream" style="height:28px;width:auto;display:block;">certstream-server-rust</a>
+            <nav>
+                <ul class="nav-links">
+                    <li><a href="/">Home</a></li>
+                    <li><a href="docs.html">API Docs</a></li>
+                    <li><a href="quickstart.html" class="active">Quick Start</a></li>
+                    <li><a href="architecture.html">Architecture</a></li>
+                </ul>
+            </nav>
+            <button class="mobile-menu-btn" onclick="document.getElementById('mobile-nav').classList.add('active')"><span></span><span></span><span></span></button>
+            <a href="https://github.com/reloading01/certstream-server-rust" class="gh-link" target="_blank" rel="noopener">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>
+                GitHub
+            </a>
+        </div>
+    </header>
+    <div class="mobile-nav" id="mobile-nav">
+        <div class="mobile-nav-header">
+            <a href="/" class="logo"><img src="logo.png" alt="Certstream" style="height:28px;width:auto;display:block;">certstream-server-rust</a>
+            <button class="mobile-nav-close" onclick="document.getElementById('mobile-nav').classList.remove('active')">&times;</button>
+        </div>
+        <ul class="mobile-nav-links">
+            <li><a href="/">Home</a></li>
+            <li><a href="docs.html">API Docs</a></li>
+            <li><a href="quickstart.html" class="active">Quick Start</a></li>
+            <li><a href="architecture.html">Architecture</a></li>
+            <li><a href="https://github.com/reloading01/certstream-server-rust" target="_blank" rel="noopener">GitHub</a></li>
+        </ul>
+    </div>
+
+    <main>
+        <div class="wrap">
+            <div class="page-header">
+                <h1>Certstream Quick Start Guide</h1>
+                <p>Run your own certificate transparency streaming server in seconds</p>
+            </div>
+        </div>
+
+        <section>
+            <div class="wrap">
+                <div class="section-header">
+                    <h2>Public API (No Setup Required)</h2>
+                    <p>Try it immediately — no server needed</p>
+                </div>
+                <div style="background:#1a1a1a;border:1px solid #333;border-radius:8px;padding:20px 24px;margin-bottom:24px;">
+                    <p style="margin:0 0 12px 0;color:#999;line-height:1.6;">
+                        A community instance is available at
+                        <code style="background:#0d0d0d;padding:2px 6px;border-radius:4px;color:#60a5fa;">api.certstream.dev</code>
+                        for exploration and testing.
+                        <strong style="color:#f59e0b;">Best-effort, no uptime guarantee.</strong>
+                        Rate limited. Max 10 connections per IP.
+                        Live status: <a href="https://certstream.instatus.com" target="_blank" rel="noopener" style="color:#60a5fa;">certstream.instatus.com</a>.
+                    </p>
+                </div>
+                <div class="code-examples">
+                    <div class="code-example">
+                        <div class="code-example-header">
+                            <span class="lang">WebSocket</span>
+                        </div>
+                        <pre>websocat wss://api.certstream.dev/</pre>
+                    </div>
+                    <div class="code-example">
+                        <div class="code-example-header">
+                            <span class="lang">SSE</span>
+                        </div>
+                        <pre>curl -N https://api.certstream.dev/sse</pre>
+                    </div>
+                    <div class="code-example">
+                        <div class="code-example-header">
+                            <span class="lang">Health</span>
+                        </div>
+                        <pre>curl https://api.certstream.dev/health/deep</pre>
+                    </div>
+                    <div class="code-example">
+                        <div class="code-example-header">
+                            <span class="lang">Stats</span>
+                        </div>
+                        <pre>curl https://api.certstream.dev/api/stats</pre>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section>
+            <div class="wrap">
+                <div class="section-header">
+                    <h2>Self-Host</h2>
+                    <p>Run your own instance for production workloads</p>
+                </div>
+            </div>
+        </section>
+
+        <section>
+            <div class="wrap">
+                <div class="section-header">
+                    <h2>1. Run the Server</h2>
+                </div>
+                <div class="code-examples" style="grid-template-columns: 1fr;">
+                    <div class="code-example">
+                        <div class="code-example-header">
+                            <span class="lang">Docker</span>
+                        </div>
+                        <pre>docker run -d -p 8080:8080 ghcr.io/reloading01/certstream-server-rust:latest</pre>
+                    </div>
+                </div>
+                <p style="margin-top: 16px; color: #666; font-size: 0.9rem; text-align: center;">
+                    Server is now running at <code style="background: #1a1a1a; padding: 2px 6px; border-radius: 4px; color: #4ade80;">ws://localhost:8080</code>
+                </p>
+            </div>
+        </section>
+
+        <section>
+            <div class="wrap">
+                <div class="section-header">
+                    <h2>2. Connect</h2>
+                </div>
+                <div class="code-examples">
+                    <div class="code-example">
+                        <div class="code-example-header">
+                            <span class="lang">Python</span>
+                        </div>
+                        <pre>import certstream
+
+def callback(message, context):
+    if message["message_type"] == "certificate_update":
+        domains = message["data"]["leaf_cert"]["all_domains"]
+        print(domains)
+
+certstream.listen_for_events(callback, url="wss://api.certstream.dev/")</pre>
+                    </div>
+                    <div class="code-example">
+                        <div class="code-example-header">
+                            <span class="lang">JavaScript</span>
+                        </div>
+                        <pre>const ws = new WebSocket("wss://api.certstream.dev/");
+
+ws.onmessage = (event) => {
+    const data = JSON.parse(event.data);
+    if (data.message_type === "certificate_update") {
+        console.log(data.data.leaf_cert.all_domains);
+    }
+};</pre>
+                    </div>
+                    <div class="code-example">
+                        <div class="code-example-header">
+                            <span class="lang">cURL</span>
+                        </div>
+                        <pre>curl -N https://api.certstream.dev/sse</pre>
+                    </div>
+                    <div class="code-example">
+                        <div class="code-example-header">
+                            <span class="lang">websocat</span>
+                        </div>
+                        <pre>websocat wss://api.certstream.dev/</pre>
+                    </div>
+                    <div class="code-example">
+                        <div class="code-example-header">
+                            <span class="lang">JavaScript</span>
+                            <span class="tag">Domains-only stream</span>
+                        </div>
+                        <pre>const ws = new WebSocket("wss://api.certstream.dev/domains-only");
+
+ws.onmessage = (event) => {
+    const msg = JSON.parse(event.data);
+    // msg.message_type === "dns_entries"
+    // msg.data is a bare string array — no nested object
+    if (msg.message_type === "dns_entries") {
+        console.log(msg.data); // ["example.com", "www.example.com"]
+    }
+};</pre>
+                    </div>
+                </div>
+                <p style="margin-top: 16px; color: #666; font-size: 0.9rem; text-align: center;">
+                    The <code>/domains-only</code> stream uses <code>message_type: "dns_entries"</code> and <code>data</code> is a bare string array.
+                    For SSE, use <code>curl -N https://api.certstream.dev/sse?stream=domains</code>.
+                </p>
+            </div>
+        </section>
+
+        <section>
+            <div class="wrap">
+                <div class="section-header">
+                    <h2>3. Production Setup</h2>
+                </div>
+                <div class="code-examples" style="grid-template-columns: 1fr;">
+                    <div class="code-example">
+                        <div class="code-example-header">
+                            <span class="lang">Docker</span>
+                            <span class="tag">With state persistence</span>
+                        </div>
+                        <pre>docker run -d \
+  --name certstream \
+  --restart unless-stopped \
+  -p 8080:8080 \
+  -v certstream-state:/data \
+  -e CERTSTREAM_CT_LOG_STATE_FILE=/data/state.json \
+  ghcr.io/reloading01/certstream-server-rust:latest</pre>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+    </main>
+
+    <footer>
+        <div class="wrap">
+            <div class="links">
+                <a href="https://github.com/reloading01/certstream-server-rust" target="_blank" rel="noopener">GitHub</a>
+                <a href="https://github.com/reloading01/certstream-server-rust/pkgs/container/certstream-server-rust" target="_blank" rel="noopener">GitHub Container Registry</a>
+                <a href="docs.html">Documentation</a>
+                <a href="https://github.com/reloading01/certstream-server-rust/issues" target="_blank" rel="noopener">Issues</a>
+                <a href="https://github.com/reloading01/certstream-server-rust/blob/main/LICENSE" target="_blank" rel="noopener">MIT License</a>
+                <a href="https://certstream.instatus.com" target="_blank" rel="noopener">Status</a>
+            </div>
+            <p>certstream-server-rust</p>
+        </div>
+    </footer>
+</body>
+</html>

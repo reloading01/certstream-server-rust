@@ -1,0 +1,935 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <!-- Google tag (gtag.js) -->
+    <script async src="https://www.googletagmanager.com/gtag/js?id=G-FKL0PZPXZL"></script>
+    <script>
+      window.dataLayer = window.dataLayer || [];
+      function gtag(){dataLayer.push(arguments);}
+      gtag("js", new Date());
+      gtag("config", "G-FKL0PZPXZL");
+    </script>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Certstream API Documentation - WebSocket, SSE Endpoints</title>
+    <meta name="description" content="Complete API documentation for certstream-server-rust. Connect to real-time certificate streams via WebSocket or SSE. Code examples in Python, JavaScript, Go, and cURL. Environment variables and YAML configuration reference.">
+    <meta name="robots" content="index, follow">
+    <link rel="canonical" href="https://certstream.dev/docs.html">
+    <meta property="og:type" content="website">
+    <meta property="og:url" content="https://certstream.dev/docs.html">
+    <meta property="og:title" content="Certstream API Documentation - WebSocket, SSE Streaming">
+    <meta property="og:description" content="Connect to certstream via WebSocket or SSE. Real-time CT log streaming with code examples in Python, JavaScript, Go, and cURL.">
+    <meta name="theme-color" content="#b7410e">
+    <link rel="icon" type="image/svg+xml" href="favicon.svg">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="styles.css">
+    <script type="application/ld+json">
+    {
+        "@context": "https://schema.org",
+        "@type": "WebAPI",
+        "name": "Certstream API",
+        "description": "Real-time Certificate Transparency log streaming API. WebSocket and SSE endpoints for monitoring SSL/TLS certificate issuance from 60+ CT logs.",
+        "url": "https://certstream.dev/docs.html",
+        "documentation": "https://certstream.dev/docs.html",
+        "provider": {
+            "@type": "Person",
+            "name": "reloading01",
+            "url": "https://github.com/reloading01"
+        },
+        "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+        "serviceEndpoint": [
+            { "@type": "EntryPoint", "urlTemplate": "wss://api.certstream.dev/", "description": "Certstream lite WebSocket API" },
+            { "@type": "EntryPoint", "urlTemplate": "wss://api.certstream.dev/full-stream", "description": "Certstream full WebSocket API" },
+            { "@type": "EntryPoint", "urlTemplate": "wss://api.certstream.dev/domains-only", "description": "Certstream domains-only WebSocket API" },
+            { "@type": "EntryPoint", "urlTemplate": "https://api.certstream.dev/sse", "description": "Certstream SSE API" }
+        ]
+    }
+    </script>
+    <script type="application/ld+json">
+    {
+        "@context": "https://schema.org",
+        "@type": "TechArticle",
+        "headline": "Certstream API Documentation",
+        "description": "Complete API reference for certstream-server-rust WebSocket and SSE endpoints",
+        "author": {
+            "@type": "Person",
+            "name": "reloading01"
+        },
+        "publisher": {
+            "@type": "Organization",
+            "name": "certstream-server-rust"
+        }
+    }
+    </script>
+</head>
+<body>
+    <header>
+        <div class="wrap">
+            <a href="/" class="logo"><img src="logo.png" alt="Certstream" style="height:28px;width:auto;display:block;">certstream-server-rust</a>
+            <nav>
+                <ul class="nav-links">
+                    <li><a href="/">Home</a></li>
+                    <li><a href="docs.html" class="active">API Docs</a></li>
+                    <li><a href="quickstart.html">Quick Start</a></li>
+                    <li><a href="architecture.html">Architecture</a></li>
+                </ul>
+            </nav>
+            <button class="mobile-menu-btn" onclick="document.getElementById('mobile-nav').classList.add('active')"><span></span><span></span><span></span></button>
+            <a href="https://github.com/reloading01/certstream-server-rust" class="gh-link" target="_blank" rel="noopener">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>
+                GitHub
+            </a>
+        </div>
+    </header>
+    <div class="mobile-nav" id="mobile-nav">
+        <div class="mobile-nav-header">
+            <a href="/" class="logo"><img src="logo.png" alt="Certstream" style="height:28px;width:auto;display:block;">certstream-server-rust</a>
+            <button class="mobile-nav-close" onclick="document.getElementById('mobile-nav').classList.remove('active')">&times;</button>
+        </div>
+        <ul class="mobile-nav-links">
+            <li><a href="/">Home</a></li>
+            <li><a href="docs.html" class="active">API Docs</a></li>
+            <li><a href="quickstart.html">Quick Start</a></li>
+            <li><a href="architecture.html">Architecture</a></li>
+            <li><a href="https://github.com/reloading01/certstream-server-rust" target="_blank" rel="noopener">GitHub</a></li>
+        </ul>
+    </div>
+
+    <main>
+        <div class="wrap">
+            <div class="page-header">
+                <h1>Certstream API Documentation</h1>
+                <p>Connect to real-time certificate streams via WebSocket or SSE</p>
+            </div>
+        </div>
+
+        <section>
+            <div class="wrap">
+                <div class="section-header">
+                    <h2>What is Certstream?</h2>
+                    <p>Real-time certificate transparency log aggregation</p>
+                </div>
+                <div class="features-list">
+                    <div class="feature-item">
+                        <h3>Overview</h3>
+                        <p>Certstream aggregates certificates from Certificate Transparency logs and streams them in real-time. This Rust implementation is a drop-in replacement for certstream-server (Elixir) and certstream-server-go with better performance.</p>
+                    </div>
+                    <div class="feature-item">
+                        <h3>Why Rust?</h3>
+                        <ul>
+                            <li>~150MB stable RSS (flat footprint under sustained load — no growth over time)</li>
+                            <li>Zero-copy broadcast via <code>Arc&lt;PreSerializedMessage&gt;</code> — serialize once, deliver to all</li>
+                            <li>Handles 50,000+ concurrent connections</li>
+                            <li>SIMD-accelerated JSON serialization via <code>simd-json</code> (enabled by default)</li>
+                            <li>Single binary, no dependencies</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section>
+            <div class="wrap">
+                <div class="section-header">
+                    <h2>Public API</h2>
+                    <p>Community endpoint for research and testing</p>
+                </div>
+                <div class="info-box" style="background:#1a1a1a;border:1px solid #333;border-radius:8px;padding:20px 24px;margin-bottom:24px;max-width:none;">
+                    <p style="margin:0;color:#999;line-height:1.6;">
+                        <strong style="color:#f59e0b;">Best-effort.</strong>
+                        A community instance is available at <code style="background:#0d0d0d;padding:2px 6px;border-radius:4px;color:#60a5fa;">api.certstream.dev</code> for exploration and testing.
+                        No uptime guarantee. Rate limited. Maximum <strong style="color:#e8e8e8;">10 connections per IP</strong>.
+                        For production workloads, <a href="quickstart.html" style="color:#b7410e;">self-host your own instance</a>.
+                    </p>
+                </div>
+                <table class="endpoints-table">
+                    <thead>
+                        <tr>
+                            <th>Endpoint</th>
+                            <th>Protocol</th>
+                            <th>Description</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><code>wss://api.certstream.dev/</code></td>
+                            <td>WebSocket</td>
+                            <td>Lite stream (no DER/chain data)</td>
+                        </tr>
+                        <tr>
+                            <td><code>wss://api.certstream.dev/full-stream</code></td>
+                            <td>WebSocket</td>
+                            <td>Full stream with DER and certificate chain</td>
+                        </tr>
+                        <tr>
+                            <td><code>wss://api.certstream.dev/domains-only</code></td>
+                            <td>WebSocket</td>
+                            <td>Domain names only (minimal data)</td>
+                        </tr>
+                        <tr>
+                            <td><code>https://api.certstream.dev/sse</code></td>
+                            <td>SSE</td>
+                            <td>Server-Sent Events lite stream</td>
+                        </tr>
+                        <tr>
+                            <td><code>https://api.certstream.dev/sse?stream=full</code></td>
+                            <td>SSE</td>
+                            <td>Server-Sent Events full stream</td>
+                        </tr>
+                        <tr>
+                            <td><code>https://api.certstream.dev/sse?stream=domains</code></td>
+                            <td>SSE</td>
+                            <td>Server-Sent Events domains only</td>
+                        </tr>
+                        <tr>
+                            <td><code>https://api.certstream.dev/api/stats</code></td>
+                            <td>HTTP</td>
+                            <td>Server statistics (requires <code>CERTSTREAM_API_ENABLED=true</code>)</td>
+                        </tr>
+                        <tr>
+                            <td><code>https://api.certstream.dev/health</code></td>
+                            <td>HTTP</td>
+                            <td>Basic health check (returns "OK")</td>
+                        </tr>
+                        <tr>
+                            <td><code>https://api.certstream.dev/health/deep</code></td>
+                            <td>HTTP</td>
+                            <td>Detailed health with log status, connections, uptime (JSON)</td>
+                        </tr>
+                        <tr>
+                            <td><code><a href="https://certstream.instatus.com" target="_blank" rel="noopener" style="color:inherit;">https://certstream.instatus.com</a></code></td>
+                            <td>HTTP</td>
+                            <td>Status page — uptime history, incidents, response times</td>
+                        </tr>
+                        <tr>
+                            <td><code>https://api.certstream.dev/example.json</code></td>
+                            <td>HTTP</td>
+                            <td>Sample message format</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <section>
+            <div class="wrap">
+                <div class="section-header">
+                    <h2>Message Format</h2>
+                    <p>JSON structure for certificate update messages</p>
+                </div>
+                <div class="code-example" style="max-width: 900px;">
+                    <div class="code-example-header">
+                        <span class="lang">JSON</span>
+                        <span class="tag">certificate_update</span>
+                    </div>
+                    <pre>{
+  "<span class="str">message_type</span>": "<span class="str">certificate_update</span>",
+  "<span class="str">data</span>": {
+    "<span class="str">update_type</span>": "<span class="str">X509LogEntry</span>",
+    "<span class="str">leaf_cert</span>": {
+      "<span class="str">subject</span>": {
+        "<span class="str">CN</span>": "<span class="str">example.com</span>",
+        "<span class="str">O</span>": "<span class="str">Example Inc</span>",
+        "<span class="str">C</span>": "<span class="str">US</span>",
+        "<span class="str">aggregated</span>": "<span class="str">/C=US/CN=example.com/O=Example Inc</span>"
+      },
+      "<span class="str">issuer</span>": {
+        "<span class="str">CN</span>": "<span class="str">R3</span>",
+        "<span class="str">O</span>": "<span class="str">Let's Encrypt</span>",
+        "<span class="str">aggregated</span>": "<span class="str">/CN=R3/O=Let's Encrypt</span>"
+      },
+      "<span class="str">serial_number</span>": "<span class="str">048A3F...</span>",
+      "<span class="str">not_before</span>": <span class="var">1703721600</span>,
+      "<span class="str">not_after</span>": <span class="var">1735257600</span>,
+      "<span class="str">fingerprint</span>": "<span class="str">AB:CD:EF:01:...</span>",
+      "<span class="str">sha1</span>": "<span class="str">AB:CD:EF:01:...</span>",
+      "<span class="str">sha256</span>": "<span class="str">AB:CD:EF:01:...</span>",
+      "<span class="str">signature_algorithm</span>": "<span class="str">sha256, rsa</span>",
+      "<span class="str">is_ca</span>": <span class="var">false</span>,
+      "<span class="str">all_domains</span>": [
+        "<span class="str">example.com</span>",
+        "<span class="str">www.example.com</span>"
+      ],
+      "<span class="str">extensions</span>": {
+        "<span class="str">keyUsage</span>": "<span class="str">Digital Signature, Key Encipherment</span>",
+        "<span class="str">extendedKeyUsage</span>": "<span class="str">serverAuth, clientAuth</span>",
+        "<span class="str">basicConstraints</span>": "<span class="str">CA:FALSE</span>",
+        "<span class="str">subjectAltName</span>": "<span class="str">DNS:example.com, DNS:www.example.com</span>"
+      },
+      "<span class="str">as_der</span>": "<span class="str">BASE64...</span>"  <span class="cm">// full-stream only</span>
+    },
+    "<span class="str">chain</span>": [...],  <span class="cm">// full-stream only</span>
+    "<span class="str">cert_index</span>": <span class="var">1234567890</span>,
+    "<span class="str">seen</span>": <span class="var">1703808000.123</span>,
+    "<span class="str">source</span>": {
+      "<span class="str">url</span>": "<span class="str">ct.googleapis.com/logs/argon2025</span>",
+      "<span class="str">name</span>": "<span class="str">Google Argon 2025</span>"
+    }
+  }
+}</pre>
+                </div>
+            </div>
+        </section>
+
+        <section>
+            <div class="wrap">
+                <div class="section-header">
+                    <h2>Domains-Only Message Format</h2>
+                    <p>The <code>/domains-only</code> WebSocket and <code>/sse?stream=domains</code> endpoints use a distinct schema</p>
+                </div>
+                <div class="code-example" style="max-width: 900px;">
+                    <div class="code-example-header">
+                        <span class="lang">JSON</span>
+                        <span class="tag">dns_entries (domains-only stream)</span>
+                    </div>
+                    <pre>{
+  "<span class="str">message_type</span>": "<span class="str">dns_entries</span>",
+  "<span class="str">data</span>": [
+    "<span class="str">example.com</span>",
+    "<span class="str">www.example.com</span>",
+    "<span class="str">*.example.com</span>"
+  ]
+}</pre>
+                </div>
+                <p style="margin-top: 1rem; color: var(--text-muted);">
+                    Unlike the full/lite streams, <code>message_type</code> is <code>"dns_entries"</code> (not <code>"certificate_update"</code>),
+                    and <code>data</code> is a bare JSON array of strings — not an object with nested fields.
+                    Use this stream when you only need domain names and want minimal bandwidth.
+                </p>
+            </div>
+        </section>
+
+        <section>
+            <div class="wrap">
+                <div class="section-header">
+                    <h2>Stream Types</h2>
+                    <p>Choose the right stream for your use case</p>
+                </div>
+                <div class="features-list">
+                    <div class="feature-item">
+                        <h3>Lite Stream (default)</h3>
+                        <p>Contains certificate metadata, domains, issuer info, and timestamps. No DER-encoded certificate data or chain. Best for most monitoring use cases.</p>
+                    </div>
+                    <div class="feature-item">
+                        <h3>Full Stream</h3>
+                        <p>Includes everything in lite stream plus base64-encoded DER certificate and full chain. Use when you need to verify or store complete certificates.</p>
+                    </div>
+                    <div class="feature-item">
+                        <h3>Domains Only</h3>
+                        <p>Minimal payload with just domain names. Lowest bandwidth option for domain-focused monitoring like phishing detection. Note: the schema differs from the other streams — <code>message_type</code> is <code>"dns_entries"</code> and <code>data</code> is a bare array of strings, not an object.</p>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section>
+            <div class="wrap">
+                <div class="section-header">
+                    <h2>Quick Start</h2>
+                    <p>Connect and start receiving certificates in seconds</p>
+                </div>
+                <div class="code-examples" >
+                    <div class="code-example">
+                        <div class="code-example-header">
+                            <span class="lang">JavaScript</span>
+                            <span class="tag">Browser</span>
+                        </div>
+                        <pre><span class="kw">const</span> ws = <span class="kw">new</span> <span class="fn">WebSocket</span>(<span class="str">'wss://api.certstream.dev/'</span>);
+
+ws.<span class="fn">onmessage</span> = (event) => {
+    <span class="kw">const</span> data = <span class="var">JSON</span>.<span class="fn">parse</span>(event.data);
+    <span class="kw">if</span> (data.message_type === <span class="str">'certificate_update'</span>) {
+        <span class="var">console</span>.<span class="fn">log</span>(data.data.leaf_cert.all_domains);
+    }
+};</pre>
+                    </div>
+                    <div class="code-example">
+                        <div class="code-example-header">
+                            <span class="lang">cURL</span>
+                            <span class="tag">SSE</span>
+                        </div>
+                        <pre><span class="cm"># Lite stream</span>
+curl -N https://api.certstream.dev/sse
+
+<span class="cm"># Full stream</span>
+curl -N "https://api.certstream.dev/sse?stream=full"
+
+<span class="cm"># Domains only</span>
+curl -N "https://api.certstream.dev/sse?stream=domains"</pre>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section>
+            <div class="wrap">
+                <div class="section-header">
+                    <h2>Client Examples</h2>
+                    <p>Connect using your preferred language</p>
+                </div>
+                <div class="code-examples" >
+                    <div class="code-example">
+                        <div class="code-example-header">
+                            <span class="lang">Python</span>
+                            <span class="tag">certstream</span>
+                        </div>
+                        <pre><span class="cm"># pip install certstream</span>
+<span class="kw">import</span> certstream
+
+<span class="kw">def</span> <span class="fn">callback</span>(message, context):
+    <span class="kw">if</span> message[<span class="str">'message_type'</span>] == <span class="str">'certificate_update'</span>:
+        domains = message[<span class="str">'data'</span>][<span class="str">'leaf_cert'</span>][<span class="str">'all_domains'</span>]
+        <span class="fn">print</span>(domains)
+
+certstream.<span class="fn">listen_for_events</span>(callback, url=<span class="str">'ws://localhost:8080/'</span>)</pre>
+                    </div>
+                    <div class="code-example">
+                        <div class="code-example-header">
+                            <span class="lang">Go</span>
+                            <span class="tag">certstream-go</span>
+                        </div>
+                        <pre><span class="kw">import</span> <span class="str">"github.com/CaliDog/certstream-go"</span>
+
+stream, _ := certstream.<span class="fn">CertStreamEventStream</span>(<span class="var">false</span>)
+<span class="kw">for</span> event := <span class="kw">range</span> stream {
+    fmt.<span class="fn">Println</span>(event.Data.LeafCert.AllDomains)
+}</pre>
+                    </div>
+                    <div class="code-example">
+                        <div class="code-example-header">
+                            <span class="lang">JavaScript</span>
+                            <span class="tag">Node.js</span>
+                        </div>
+                        <pre><span class="kw">const</span> WebSocket = <span class="fn">require</span>(<span class="str">'ws'</span>);
+<span class="kw">const</span> ws = <span class="kw">new</span> <span class="fn">WebSocket</span>(<span class="str">'ws://localhost:8080/'</span>);
+
+ws.<span class="fn">on</span>(<span class="str">'message'</span>, (data) => {
+    <span class="kw">const</span> msg = <span class="var">JSON</span>.<span class="fn">parse</span>(data);
+    <span class="kw">if</span> (msg.message_type === <span class="str">'certificate_update'</span>) {
+        <span class="var">console</span>.<span class="fn">log</span>(msg.data.leaf_cert.all_domains);
+    }
+});</pre>
+                    </div>
+                    <div class="code-example">
+                        <div class="code-example-header">
+                            <span class="lang">Bash</span>
+                            <span class="tag">With Auth</span>
+                        </div>
+                        <pre><span class="cm"># WebSocket with token</span>
+wscat -c ws://localhost:8080/ -H <span class="str">"Authorization: Bearer your-token"</span>
+
+<span class="cm"># SSE with token</span>
+curl -H <span class="str">"Authorization: Bearer your-token"</span> http://localhost:8080/sse</pre>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section>
+            <div class="wrap">
+                <div class="section-header">
+                    <h2>Self-Hosting</h2>
+                    <p>Run your own instance with Docker or from source</p>
+                </div>
+                <div class="code-examples" style="grid-template-columns: 1fr;">
+                    <div class="code-example">
+                        <div class="code-example-header">
+                            <span class="lang">Docker</span>
+                            <span class="tag">Recommended</span>
+                        </div>
+                        <pre><span class="cm"># Quick start</span>
+docker run -d -p 8080:8080 -p 8081:8081 ghcr.io/reloading01/certstream-server-rust:latest
+
+<span class="cm"># With custom config</span>
+docker run -d \
+  -p 8080:8080 \
+  -p 8081:8081 \
+  -v ./config.yaml:/app/config.yaml \
+  -v ./state:/app/state \
+  ghcr.io/reloading01/certstream-server-rust:latest
+
+<span class="cm"># Docker Compose</span>
+version: '3.8'
+services:
+  certstream:
+    image: ghcr.io/reloading01/certstream-server-rust:latest
+    ports:
+      - "8080:8080"
+      - "8081:8081"
+    volumes:
+      - ./config.yaml:/app/config.yaml
+      - ./state:/app/state
+    restart: unless-stopped</pre>
+                    </div>
+                    <div class="code-example">
+                        <div class="code-example-header">
+                            <span class="lang">Build</span>
+                            <span class="tag">From Source</span>
+                        </div>
+                        <pre><span class="cm"># Docker build</span>
+docker build -t certstream-server-rust .
+docker run -d -p 8080:8080 certstream-server-rust
+
+<span class="cm"># Cargo build</span>
+cargo build --release
+./target/release/certstream-server-rust
+
+<span class="cm"># Docker Compose</span>
+docker compose up -d</pre>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section>
+            <div class="wrap">
+                <div class="section-header">
+                    <h2>Environment Variables</h2>
+                    <p>Configure the server using environment variables</p>
+                </div>
+                <h3 style="margin-bottom: 1rem; margin-top: 2rem;">General Settings</h3>
+                <table class="endpoints-table">
+                    <thead>
+                        <tr>
+                            <th>Variable</th>
+                            <th>Default</th>
+                            <th>Description</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><code>CERTSTREAM_HOST</code></td>
+                            <td>0.0.0.0</td>
+                            <td>Bind address</td>
+                        </tr>
+                        <tr>
+                            <td><code>CERTSTREAM_PORT</code></td>
+                            <td>8080</td>
+                            <td>HTTP/WebSocket port</td>
+                        </tr>
+                        <tr>
+                            <td><code>CERTSTREAM_LOG_LEVEL</code></td>
+                            <td>info</td>
+                            <td>debug, info, warn, error</td>
+                        </tr>
+                        <tr>
+                            <td><code>CERTSTREAM_BUFFER_SIZE</code></td>
+                            <td>1000</td>
+                            <td>Broadcast buffer</td>
+                        </tr>
+                    </tbody>
+                </table>
+
+                <h3 style="margin-bottom: 1rem; margin-top: 2rem;">Protocols</h3>
+                <table class="endpoints-table">
+                    <thead>
+                        <tr>
+                            <th>Variable</th>
+                            <th>Default</th>
+                            <th>Description</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><code>CERTSTREAM_WS_ENABLED</code></td>
+                            <td>true</td>
+                            <td>Enable WebSocket</td>
+                        </tr>
+                        <tr>
+                            <td><code>CERTSTREAM_SSE_ENABLED</code></td>
+                            <td>true</td>
+                            <td>Enable SSE</td>
+                        </tr>
+                        <tr>
+                            <td><code>CERTSTREAM_METRICS_ENABLED</code></td>
+                            <td>true</td>
+                            <td>Enable /metrics endpoint</td>
+                        </tr>
+                        <tr>
+                            <td><code>CERTSTREAM_HEALTH_ENABLED</code></td>
+                            <td>true</td>
+                            <td>Enable /health endpoint</td>
+                        </tr>
+                        <tr>
+                            <td><code>CERTSTREAM_EXAMPLE_JSON_ENABLED</code></td>
+                            <td>true</td>
+                            <td>Enable /example.json endpoint</td>
+                        </tr>
+                    </tbody>
+                </table>
+
+                <h3 style="margin-bottom: 1rem; margin-top: 2rem;">Connection Limiting</h3>
+                <table class="endpoints-table">
+                    <thead>
+                        <tr>
+                            <th>Variable</th>
+                            <th>Default</th>
+                            <th>Description</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><code>CERTSTREAM_CONNECTION_LIMIT_ENABLED</code></td>
+                            <td>false</td>
+                            <td>Enable connection limits</td>
+                        </tr>
+                        <tr>
+                            <td><code>CERTSTREAM_CONNECTION_LIMIT_MAX_CONNECTIONS</code></td>
+                            <td>10000</td>
+                            <td>Max total connections</td>
+                        </tr>
+                        <tr>
+                            <td><code>CERTSTREAM_CONNECTION_LIMIT_PER_IP_LIMIT</code></td>
+                            <td>100</td>
+                            <td>Max per IP</td>
+                        </tr>
+                    </tbody>
+                </table>
+
+                <h3 style="margin-bottom: 1rem; margin-top: 2rem;">Authentication</h3>
+                <table class="endpoints-table">
+                    <thead>
+                        <tr>
+                            <th>Variable</th>
+                            <th>Default</th>
+                            <th>Description</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><code>CERTSTREAM_AUTH_ENABLED</code></td>
+                            <td>false</td>
+                            <td>Enable token auth</td>
+                        </tr>
+                        <tr>
+                            <td><code>CERTSTREAM_AUTH_TOKENS</code></td>
+                            <td>-</td>
+                            <td>Comma-separated tokens</td>
+                        </tr>
+                        <tr>
+                            <td><code>CERTSTREAM_AUTH_HEADER_NAME</code></td>
+                            <td>Authorization</td>
+                            <td>Auth header</td>
+                        </tr>
+                    </tbody>
+                </table>
+
+                <h3 style="margin-bottom: 1rem; margin-top: 2rem;">CT Log Settings</h3>
+                <table class="endpoints-table">
+                    <thead>
+                        <tr>
+                            <th>Variable</th>
+                            <th>Default</th>
+                            <th>Description</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><code>CERTSTREAM_CT_LOG_STATE_FILE</code></td>
+                            <td>certstream_state.json</td>
+                            <td>State file path</td>
+                        </tr>
+                        <tr>
+                            <td><code>CERTSTREAM_CT_LOG_RETRY_MAX_ATTEMPTS</code></td>
+                            <td>3</td>
+                            <td>Max retry attempts</td>
+                        </tr>
+                        <tr>
+                            <td><code>CERTSTREAM_CT_LOG_REQUEST_TIMEOUT_SECS</code></td>
+                            <td>30</td>
+                            <td>Request timeout</td>
+                        </tr>
+                        <tr>
+                            <td><code>CERTSTREAM_CT_LOG_BATCH_SIZE</code></td>
+                            <td>256</td>
+                            <td>Entries per batch</td>
+                        </tr>
+                    </tbody>
+                </table>
+
+                <h3 style="margin-bottom: 1rem; margin-top: 2rem;">Hot Reload</h3>
+                <table class="endpoints-table">
+                    <thead>
+                        <tr>
+                            <th>Variable</th>
+                            <th>Default</th>
+                            <th>Description</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><code>CERTSTREAM_HOT_RELOAD_ENABLED</code></td>
+                            <td>false</td>
+                            <td>Enable hot reload</td>
+                        </tr>
+                        <tr>
+                            <td><code>CERTSTREAM_HOT_RELOAD_WATCH_PATH</code></td>
+                            <td>-</td>
+                            <td>Config file to watch</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <section>
+            <div class="wrap">
+                <div class="section-header">
+                    <h2>Configuration File</h2>
+                    <p>Full YAML configuration example</p>
+                </div>
+                <div class="code-examples" style="grid-template-columns: 1fr;">
+                    <div class="code-example">
+                        <div class="code-example-header">
+                            <span class="lang">YAML</span>
+                            <span class="tag">config.yaml</span>
+                        </div>
+                        <pre><span class="str">host</span>: <span class="str">"0.0.0.0"</span>
+<span class="str">port</span>: <span class="var">8080</span>
+<span class="str">log_level</span>: <span class="str">"info"</span>
+<span class="str">buffer_size</span>: <span class="var">1000</span>
+<span class="str">ct_logs_url</span>: <span class="str">"https://www.gstatic.com/ct/log_list/v3/all_logs_list.json"</span>
+
+<span class="str">protocols</span>:
+  <span class="str">websocket</span>: <span class="var">true</span>
+  <span class="str">sse</span>: <span class="var">true</span>
+  <span class="str">metrics</span>: <span class="var">true</span>
+  <span class="str">health</span>: <span class="var">true</span>
+  <span class="str">example_json</span>: <span class="var">true</span>
+
+<span class="str">ct_log</span>:
+  <span class="str">state_file</span>: <span class="str">"/data/state.json"</span>
+  <span class="str">batch_size</span>: <span class="var">256</span>
+  <span class="str">poll_interval_ms</span>: <span class="var">500</span>
+  <span class="str">retry_max_attempts</span>: <span class="var">3</span>
+  <span class="str">request_timeout_secs</span>: <span class="var">30</span>
+
+<span class="str">connection_limit</span>:
+  <span class="str">enabled</span>: <span class="var">true</span>
+  <span class="str">max_connections</span>: <span class="var">10000</span>
+  <span class="str">per_ip_limit</span>: <span class="var">100</span>
+
+<span class="str">auth</span>:
+  <span class="str">enabled</span>: <span class="var">false</span>
+  <span class="str">tokens</span>:
+    - <span class="str">"secret-token-1"</span>
+    - <span class="str">"secret-token-2"</span>
+  <span class="str">header_name</span>: <span class="str">"Authorization"</span>
+
+<span class="str">hot_reload</span>:
+  <span class="str">enabled</span>: <span class="var">true</span>
+
+<span class="str">custom_logs</span>:
+  - <span class="str">name</span>: <span class="str">"My Custom CT Log"</span>
+    <span class="str">url</span>: <span class="str">"https://ct.example.com/log"</span>
+
+<span class="cm"># Static CT logs (Sunlight / static-ct-api protocol)</span>
+<span class="cm"># Use monitoring prefix (mon.*) for read access</span>
+<span class="str">static_logs</span>:
+  - <span class="str">name</span>: <span class="str">"Let's Encrypt 'Willow' 2025h2d"</span>
+    <span class="str">url</span>: <span class="str">"https://mon.willow.ct.letsencrypt.org/2025h2d/"</span>
+  - <span class="str">name</span>: <span class="str">"Let's Encrypt 'Willow' 2026h1"</span>
+    <span class="str">url</span>: <span class="str">"https://mon.willow.ct.letsencrypt.org/2026h1/"</span>
+  - <span class="str">name</span>: <span class="str">"Let's Encrypt 'Sycamore' 2025h2d"</span>
+    <span class="str">url</span>: <span class="str">"https://mon.sycamore.ct.letsencrypt.org/2025h2d/"</span>
+  - <span class="str">name</span>: <span class="str">"Let's Encrypt 'Sycamore' 2026h1"</span>
+    <span class="str">url</span>: <span class="str">"https://mon.sycamore.ct.letsencrypt.org/2026h1/"</span></pre>
+                    </div>
+                </div>
+                <p style="margin-top: 1rem; color: var(--text-muted);">Config search order: <code>CERTSTREAM_CONFIG</code> env var → <code>./config.yaml</code> → <code>./config.yml</code> → <code>/etc/certstream/config.yaml</code></p>
+            </div>
+        </section>
+
+        <section>
+            <div class="wrap">
+                <div class="section-header">
+                    <h2>Performance</h2>
+                    <p>Load tested with 500 concurrent WebSocket clients</p>
+                </div>
+                <table class="endpoints-table">
+                    <thead>
+                        <tr>
+                            <th>Metric</th>
+                            <th>Rust</th>
+                            <th>Go</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td>Memory (idle)</td>
+                            <td><strong>27 MB</strong></td>
+                            <td>~49 MB</td>
+                        </tr>
+                        <tr>
+                            <td>Memory (under load, stable)</td>
+                            <td><strong>~150 MB</strong></td>
+                            <td>~309 MB</td>
+                        </tr>
+                        <tr>
+                            <td>CPU (avg under load)</td>
+                            <td><strong>23%</strong></td>
+                            <td>72%</td>
+                        </tr>
+                        <tr>
+                            <td>Latency (avg)</td>
+                            <td><strong>8.4ms</strong></td>
+                            <td>9.2ms</td>
+                        </tr>
+                        <tr>
+                            <td>P99 Latency</td>
+                            <td><strong>172ms</strong></td>
+                            <td>187ms</td>
+                        </tr>
+                        <tr>
+                            <td>Broadcast throughput</td>
+                            <td><strong>48.6K/s</strong></td>
+                            <td>27K/s</td>
+                        </tr>
+                    </tbody>
+                </table>
+                <p style="margin-top: 1rem;"><strong>Result (v1.3.0):</strong> ~2x less memory under load (flat RSS, no growth over time), 1.8x higher broadcast throughput, zero-copy pipeline via <code>Arc&lt;PreSerializedMessage&gt;</code>.</p>
+            </div>
+        </section>
+
+        <section>
+            <div class="wrap">
+                <div class="section-header">
+                    <h2>Prometheus Metrics</h2>
+                    <p>Key metrics available at the <code>/metrics</code> endpoint</p>
+                </div>
+                <h3 style="margin-bottom: 1rem; margin-top: 2rem;">Core Metrics</h3>
+                <table class="endpoints-table">
+                    <thead>
+                        <tr>
+                            <th>Metric</th>
+                            <th>Type</th>
+                            <th>Description</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><code>certstream_messages_sent</code></td>
+                            <td>counter</td>
+                            <td>Total certificate messages broadcast</td>
+                        </tr>
+                        <tr>
+                            <td><code>certstream_parse_failures</code></td>
+                            <td>counter</td>
+                            <td>Failed certificate parses (RFC 6962)</td>
+                        </tr>
+                        <tr>
+                            <td><code>certstream_ct_logs_count</code></td>
+                            <td>gauge</td>
+                            <td>Number of RFC 6962 CT logs monitored</td>
+                        </tr>
+                        <tr>
+                            <td><code>certstream_worker_panics</code></td>
+                            <td>counter</td>
+                            <td>Worker panic count (auto-recovered)</td>
+                        </tr>
+                    </tbody>
+                </table>
+                <h3 style="margin-bottom: 1rem; margin-top: 2rem;">Static CT Metrics (v1.3.0)</h3>
+                <table class="endpoints-table">
+                    <thead>
+                        <tr>
+                            <th>Metric</th>
+                            <th>Type</th>
+                            <th>Description</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><code>certstream_static_ct_logs_count</code></td>
+                            <td>gauge</td>
+                            <td>Number of static CT logs monitored</td>
+                        </tr>
+                        <tr>
+                            <td><code>certstream_static_ct_tiles_fetched</code></td>
+                            <td>counter</td>
+                            <td>Total tiles fetched from static CT logs</td>
+                        </tr>
+                        <tr>
+                            <td><code>certstream_static_ct_entries_parsed</code></td>
+                            <td>counter</td>
+                            <td>Entries successfully parsed from tiles</td>
+                        </tr>
+                        <tr>
+                            <td><code>certstream_static_ct_checkpoint_errors</code></td>
+                            <td>counter</td>
+                            <td>Checkpoint fetch/parse failures</td>
+                        </tr>
+                        <tr>
+                            <td><code>certstream_issuer_cache_size</code></td>
+                            <td>gauge</td>
+                            <td>Cached issuer certificates</td>
+                        </tr>
+                        <tr>
+                            <td><code>certstream_duplicates_filtered</code></td>
+                            <td>counter</td>
+                            <td>Duplicate certificates filtered by dedup</td>
+                        </tr>
+                        <tr>
+                            <td><code>certstream_dedup_cache_size</code></td>
+                            <td>gauge</td>
+                            <td>Current dedup cache entries</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <section>
+            <div class="wrap">
+                <div class="section-header">
+                    <h2>CT Logs Monitored</h2>
+                    <p>49+ RFC 6962 logs + static CT logs with cross-log deduplication</p>
+                </div>
+                <div class="features-list">
+                    <div class="feature-item">
+                        <h3>Google</h3>
+                        <p>Argon, Xenon, Solera, Submariner</p>
+                    </div>
+                    <div class="feature-item">
+                        <h3>Cloudflare</h3>
+                        <p>Nimbus</p>
+                    </div>
+                    <div class="feature-item">
+                        <h3>DigiCert</h3>
+                        <p>Wyvern, Sphinx</p>
+                    </div>
+                    <div class="feature-item">
+                        <h3>Sectigo</h3>
+                        <p>Elephant, Tiger, Dodo</p>
+                    </div>
+                    <div class="feature-item">
+                        <h3>Let's Encrypt (Static CT)</h3>
+                        <p>Willow 2025h2/2026h1, Sycamore 2025h2/2026h1</p>
+                    </div>
+                    <div class="feature-item">
+                        <h3>Others</h3>
+                        <p>TrustAsia, Nordu, and more</p>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+    </main>
+
+    <footer>
+        <div class="wrap">
+            <div class="links">
+                <a href="https://github.com/reloading01/certstream-server-rust" target="_blank" rel="noopener">GitHub</a>
+                <a href="https://github.com/reloading01/certstream-server-rust/pkgs/container/certstream-server-rust" target="_blank" rel="noopener">GitHub Container Registry</a>
+                <a href="docs.html">Documentation</a>
+                <a href="https://github.com/reloading01/certstream-server-rust/issues" target="_blank" rel="noopener">Issues</a>
+                <a href="https://github.com/reloading01/certstream-server-rust/blob/main/LICENSE" target="_blank" rel="noopener">MIT License</a>
+                <a href="https://certstream.instatus.com" target="_blank" rel="noopener">Status</a>
+            </div>
+            <p>certstream-server-rust</p>
+        </div>
+    </footer>
+</body>
+</html>

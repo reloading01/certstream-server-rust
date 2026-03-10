@@ -1,0 +1,53 @@
+host: "0.0.0.0"
+port: 8080
+log_level: "info"
+buffer_size: 1000
+ct_logs_url: "https://www.gstatic.com/ct/log_list/v3/all_logs_list.json"
+
+protocols:
+  websocket: true
+  sse: true
+  metrics: true
+  health: true
+  example_json: true
+
+ct_log:
+  retry_max_attempts: 3
+  retry_initial_delay_ms: 1000
+  retry_max_delay_ms: 30000
+  request_timeout_secs: 30
+  healthy_threshold: 2
+  unhealthy_threshold: 5
+  health_check_interval_secs: 60
+  state_file: "certstream_state.json"
+  batch_size: 256
+  poll_interval_ms: 1000
+
+connection_limit:
+  enabled: false
+  max_connections: 10000
+  per_ip_limit: null
+
+auth:
+  enabled: false
+  tokens: []
+  header_name: "Authorization"
+
+hot_reload:
+  enabled: false
+  watch_path: null
+
+custom_logs: []
+
+# Static CT logs (Sunlight / static-ct-api protocol)
+# These logs use checkpoint + tile-based fetching instead of get-sth/get-entries
+# Use monitoring prefix (mon.*) for read access to checkpoint and tile data
+static_logs:
+  - name: "Let's Encrypt 'Willow' 2026h1"
+    url: "https://mon.willow.ct.letsencrypt.org/2026h1/"
+  - name: "Let's Encrypt 'Sycamore' 2026h1"
+    url: "https://mon.sycamore.ct.letsencrypt.org/2026h1/"
+  - name: "Let's Encrypt 'Willow' 2025h2d"
+    url: "https://mon.willow.ct.letsencrypt.org/2025h2d/"
+  - name: "Let's Encrypt 'Sycamore' 2025h2d"
+    url: "https://mon.sycamore.ct.letsencrypt.org/2025h2d/"
