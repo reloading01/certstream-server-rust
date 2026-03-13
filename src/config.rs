@@ -281,6 +281,26 @@ fn default_header_name() -> String {
     "Authorization".to_string()
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct StreamConfig {
+    #[serde(default = "default_true")]
+    pub full: bool,
+    #[serde(default = "default_true")]
+    pub lite: bool,
+    #[serde(default = "default_true")]
+    pub domains_only: bool,
+}
+
+impl Default for StreamConfig {
+    fn default() -> Self {
+        Self {
+            full: true,
+            lite: true,
+            domains_only: true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct HotReloadConfig {
     #[serde(default)]
@@ -311,6 +331,7 @@ pub struct Config {
     pub api: ApiConfig,
     pub auth: AuthConfig,
     pub hot_reload: HotReloadConfig,
+    pub streams: StreamConfig,
     pub config_path: Option<String>,
 }
 
@@ -341,6 +362,8 @@ struct YamlConfig {
     auth: Option<AuthConfig>,
     #[serde(default)]
     hot_reload: Option<HotReloadConfig>,
+    #[serde(default)]
+    streams: Option<StreamConfig>,
 }
 
 struct YamlConfigWithPath {
@@ -387,7 +410,7 @@ impl Config {
             .ok()
             .or(yaml_config.ct_logs_url)
             .unwrap_or_else(|| {
-                "https://www.gstatic.com/ct/log_list/v3/all_logs_list.json".to_string()
+                "https://www.gstatic.com/ct/log_list/v3/log_list.json".to_string()
             });
 
         let tls_cert = env::var("CERTSTREAM_TLS_CERT").ok().or(yaml_config.tls_cert);
@@ -482,6 +505,17 @@ impl Config {
             hot_reload.watch_path = Some(v);
         }
 
+        let mut streams = yaml_config.streams.unwrap_or_default();
+        if let Ok(v) = env::var("CERTSTREAM_STREAM_FULL_ENABLED") {
+            streams.full = v.parse().unwrap_or(streams.full);
+        }
+        if let Ok(v) = env::var("CERTSTREAM_STREAM_LITE_ENABLED") {
+            streams.lite = v.parse().unwrap_or(streams.lite);
+        }
+        if let Ok(v) = env::var("CERTSTREAM_STREAM_DOMAINS_ONLY_ENABLED") {
+            streams.domains_only = v.parse().unwrap_or(streams.domains_only);
+        }
+
         Self {
             host,
             port,
@@ -499,6 +533,7 @@ impl Config {
             api,
             auth,
             hot_reload,
+            streams,
             config_path,
         }
     }
@@ -626,6 +661,7 @@ mod tests {
             api: ApiConfig::default(),
             auth: AuthConfig::default(),
             hot_reload: HotReloadConfig::default(),
+            streams: StreamConfig::default(),
             config_path: None,
         }
     }
@@ -807,5 +843,54 @@ batch_size: 512
         assert_eq!(config.state_file, Some("my_state.json".to_string()));
         assert_eq!(config.batch_size, 512);
         assert_eq!(config.retry_initial_delay_ms, 1000);
+    }
+
+    #[test]
+    fn test_stream_config_defaults() {
+        let config = StreamConfig::default();
+        assert!(config.full);
+        assert!(config.lite);
+        assert!(config.domains_only);
+    }
+
+    #[test]
+    fn test_stream_config_deserialize_partial() {
+        let yaml = r#"
+full: false
+"#;
+        let config: StreamConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(!config.full);
+        assert!(config.lite);
+        assert!(config.domains_only);
+    }
+
+    #[test]
+    fn test_stream_config_deserialize_all_disabled() {
+        let yaml = r#"
+full: false
+lite: false
+domains_only: false
+"#;
+        let config: StreamConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(!config.full);
+        assert!(!config.lite);
+        assert!(!config.domains_only);
+    }
+
+    #[test]
+    fn test_yaml_config_with_streams() {
+        let yaml = r#"
+host: "127.0.0.1"
+port: 9090
+streams:
+  full: false
+  lite: true
+  domains_only: true
+"#;
+        let config: YamlConfig = serde_yaml::from_str(yaml).unwrap();
+        let streams = config.streams.unwrap();
+        assert!(!streams.full);
+        assert!(streams.lite);
+        assert!(streams.domains_only);
     }
 }

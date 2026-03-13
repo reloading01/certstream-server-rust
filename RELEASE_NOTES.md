@@ -1,5 +1,71 @@
 # Release Notes
 
+## v1.3.3 — Bandwidth Optimization & Stream Control
+
+**March 13, 2026**
+
+Performance release cutting CT log fetch bandwidth by ~30-50% via HTTP compression, adding per-stream-type on/off config for outbound bandwidth control, switching to Chrome-trusted log list for better coverage with less waste, and deferring chain cert parsing for duplicates.
+
+### New Features
+
+**Configurable Stream Types**
+Each stream type (full, lite, domains-only) can be independently enabled or disabled via config or environment variables. Disabled streams skip JSON serialization entirely and their WebSocket/SSE routes are not registered — saving both CPU and outbound bandwidth.
+
+```yaml
+streams:
+  full: false          # Disable full stream (saves ~4-5 KB/cert outbound)
+  lite: true
+  domains_only: true
+```
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `CERTSTREAM_STREAM_FULL_ENABLED` | true | Full stream (DER + chain) |
+| `CERTSTREAM_STREAM_LITE_ENABLED` | true | Lite stream (no DER/chain) |
+| `CERTSTREAM_STREAM_DOMAINS_ONLY_ENABLED` | true | Domains-only stream |
+
+Disabling `full` alone reduces per-cert serialization cost by ~80% and is recommended for bandwidth-constrained deployments.
+
+### Performance
+
+**HTTP Compression (gzip + brotli + deflate)**
+Added `gzip`, `brotli`, and `deflate` features to reqwest. CT log servers (Google, Cloudflare, DigiCert, Sectigo) all support compressed responses. Previously, no `Accept-Encoding` header was sent — all JSON responses arrived uncompressed. Expected inbound bandwidth reduction: **~30-50%**.
+
+**Deferred Chain Parsing**
+Certificate chain parsing is now deferred until after the dedup filter check. Duplicate certificates (which account for ~60-80% of entries across overlapping CT logs) no longer pay the cost of DER-parsing 2-4 chain certs per entry.
+
+**Chrome-Trusted Log List**
+Default CT log list URL changed from `all_logs_list.json` to `log_list.json` (Chrome-trusted only). This removes ~31 test/staging/legacy logs that wasted bandwidth while adding 16 new production logs from TrustAsia, Geomys, and IPng Networks operators that were missing from the old list.
+
+| Metric | all_logs_list.json | log_list.json |
+|--------|-------------------|---------------|
+| Active production logs | 24 | 47 |
+| Test/staging (wasted bandwidth) | 19 | 0 |
+| Duplicate Solera logs | 12 | 0 |
+| New operators | — | TrustAsia, Geomys, IPng Networks |
+
+### Refactoring
+
+**`readonly` Log State**
+`LogState` struct now explicitly models the `readonly` state from the CT log list JSON, instead of relying on serde silently ignoring the unknown field.
+
+### Test Coverage
+
+189 unit tests (+4 new stream config tests).
+
+### Upgrade Notes
+
+- Drop-in upgrade from v1.3.2. No config or state file changes.
+- New `streams` config section is optional — defaults to all enabled.
+- CT log list URL changed: override with `CERTSTREAM_CT_LOGS_URL` env var if needed.
+- For bandwidth-constrained deployments, set `CERTSTREAM_STREAM_FULL_ENABLED=false`.
+
+```bash
+docker pull ghcr.io/reloading01/certstream-server-rust:1.3.3
+```
+
+---
+
 ## v1.3.2 — Live Connection Count Fix & Public API
 
 **March 9, 2026**

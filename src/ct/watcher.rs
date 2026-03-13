@@ -221,6 +221,7 @@ pub async fn run_watcher_with_cache(log: CtLog, ctx: WatcherContext) {
         shutdown,
         dedup,
         rate_limiter,
+        streams,
     } = ctx;
     use backon::{ExponentialBuilder, Retryable};
     use serde::Deserialize;
@@ -444,6 +445,10 @@ pub async fn run_watcher_with_cache(log: CtLog, ctx: WatcherContext) {
                                 continue;
                             }
 
+                            // Deferred chain parsing: only parse chain certs
+                            // for entries that passed the dedup filter.
+                            let chain = parsed.parse_chain();
+
                             let seen = chrono::Utc::now().timestamp_millis() as f64 / 1000.0;
                             // Issue #2: wrap in Arc once; share between CachedCert and CertificateData.
                             let leaf = Arc::new(parsed.leaf_cert);
@@ -463,14 +468,14 @@ pub async fn run_watcher_with_cache(log: CtLog, ctx: WatcherContext) {
                                 data: CertificateData {
                                     update_type: parsed.update_type,
                                     leaf_cert: leaf,
-                                    chain: Some(parsed.chain),
+                                    chain: Some(chain),
                                     cert_index,
                                     cert_link,
                                     seen,
                                     source: Arc::clone(&source),
                                 },
                             };
-                            broadcast_cert(msg, &tx, &cache, cached, &stats, &counter_messages);
+                            broadcast_cert(msg, &tx, &cache, cached, &stats, &counter_messages, &streams);
                         }
 
                         debug!(log = %log_name, count = count, "fetched entries");

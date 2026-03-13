@@ -225,7 +225,7 @@ flowchart LR
                 <ol class="step-list">
                     <li>
                         <h4>Fetch log list</h4>
-                        <p>On startup, fetches the official CT log list from Google's <code>all_logs_list.json</code>. Filters to only "usable" logs. Merges with custom logs from config.</p>
+                        <p>On startup, fetches the Chrome-trusted CT log list from Google's <code>log_list.json</code>. Filters out rejected and retired logs. Merges with custom logs from config.</p>
                     </li>
                     <li>
                         <h4>Spawn watchers</h4>

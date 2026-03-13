@@ -15,6 +15,7 @@ use tokio::sync::broadcast;
 use tokio::time::interval;
 use tracing::{debug, info};
 
+use crate::config::StreamConfig;
 use crate::middleware::ConnectionLimiter;
 use crate::models::PreSerializedMessage;
 
@@ -24,6 +25,7 @@ pub struct AppState {
     pub tx: broadcast::Sender<Arc<PreSerializedMessage>>,
     pub connections: ConnectionCounter,
     pub limiter: Arc<ConnectionLimiter>,
+    pub streams: Arc<StreamConfig>,
 }
 
 #[derive(Default)]
