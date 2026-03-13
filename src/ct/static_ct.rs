@@ -394,6 +394,7 @@ pub async fn run_static_ct_watcher(log: CtLog, ctx: WatcherContext) {
         shutdown,
         dedup,
         rate_limiter,
+        streams,
     } = ctx;
     use tokio::time::sleep;
 
@@ -726,7 +727,7 @@ pub async fn run_static_ct_watcher(log: CtLog, ctx: WatcherContext) {
                                         source: Arc::clone(&source),
                                     },
                                 };
-                                broadcast_cert(msg, &tx, &cache, cached, &stats, &counter_messages);
+                                broadcast_cert(msg, &tx, &cache, cached, &stats, &counter_messages, &streams);
                             }
 
                             let next_index = ((tile_index + 1) * 256).min(tree_size);

@@ -47,9 +47,7 @@ Visit **[certstream.dev](https://certstream.dev/)** for:
 
 ## Public API
 
-A community endpoint is available for research and testing at **`api.certstream.dev`**.
-
-> **Note:** This is a best-effort, community instance. No uptime guarantee. Rate limited. Max 10 connections per IP.
+A free community endpoint is available at **`api.certstream.dev`**. Check **[certstream.instatus.com](https://certstream.instatus.com)** for current status.
 
 | Endpoint | Description |
 |----------|-------------|
@@ -101,6 +99,16 @@ docker run -d \
 | `CERTSTREAM_HEALTH_ENABLED` | true | Enable /health endpoint |
 | `CERTSTREAM_EXAMPLE_JSON_ENABLED` | true | Enable /example.json endpoint |
 | `CERTSTREAM_API_ENABLED` | false | Enable REST API endpoints |
+
+**Stream Types**
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `CERTSTREAM_STREAM_FULL_ENABLED` | true | Enable full stream (DER + chain, ~4-5 KB/cert) |
+| `CERTSTREAM_STREAM_LITE_ENABLED` | true | Enable lite stream (~1 KB/cert) |
+| `CERTSTREAM_STREAM_DOMAINS_ONLY_ENABLED` | true | Enable domains-only stream (~200 B/cert) |
+
+Disabling a stream type removes its WebSocket/SSE route and skips JSON serialization entirely, saving CPU and outbound bandwidth.
 
 **Connection Limiting**
 
@@ -222,16 +230,18 @@ Benchmarked with 500 concurrent WebSocket clients, 60 seconds, identical conditi
 
 ## Certificate Transparency Logs
 
-Certstream monitors 60+ CT logs from major providers:
+Certstream monitors 50+ CT logs from all Chrome-trusted providers:
 
 | Provider | Logs |
 |----------|------|
-| Google | Argon, Xenon, Solera, Submariner |
+| Google | Argon, Xenon |
 | Cloudflare | Nimbus |
 | DigiCert | Wyvern, Sphinx |
-| Sectigo | Elephant, Tiger, Dodo |
+| Sectigo | Elephant, Tiger, Mammoth, Sabre |
 | Let's Encrypt | Willow, Sycamore (Static CT — 2025h2/2026h1) |
-| Others | TrustAsia, Nordu, and more |
+| TrustAsia | HETU, Luoshu |
+| Geomys | Tuscolo |
+| IPng Networks | Halloumi, Gouda |
 
 ## Release Notes
 

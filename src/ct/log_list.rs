@@ -39,6 +39,8 @@ struct LogState {
     #[serde(default)]
     usable: Option<StateInfo>,
     #[serde(default)]
+    readonly: Option<StateInfo>,
+    #[serde(default)]
     retired: Option<StateInfo>,
     #[serde(default)]
     rejected: Option<StateInfo>,
@@ -213,6 +215,7 @@ mod tests {
             usable: Some(StateInfo {
                 _timestamp: "2024-01-01T00:00:00Z".to_string(),
             }),
+            readonly: None,
             retired: None,
             rejected: None,
         };
@@ -224,6 +227,7 @@ mod tests {
     fn test_is_usable_retired() {
         let state = LogState {
             usable: None,
+            readonly: None,
             retired: Some(StateInfo {
                 _timestamp: "2024-01-01T00:00:00Z".to_string(),
             }),
@@ -237,6 +241,7 @@ mod tests {
     fn test_is_usable_rejected() {
         let state = LogState {
             usable: None,
+            readonly: None,
             retired: None,
             rejected: Some(StateInfo {
                 _timestamp: "2024-01-01T00:00:00Z".to_string(),
@@ -252,6 +257,7 @@ mod tests {
             usable: Some(StateInfo {
                 _timestamp: "2023-01-01T00:00:00Z".to_string(),
             }),
+            readonly: None,
             retired: Some(StateInfo {
                 _timestamp: "2024-01-01T00:00:00Z".to_string(),
             }),

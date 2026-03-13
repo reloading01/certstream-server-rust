@@ -16,7 +16,7 @@ use tokio_util::sync::CancellationToken;
 pub type OperatorRateLimiter = Arc<tokio::sync::Mutex<tokio::time::Interval>>;
 
 use crate::api::{CachedCert, CertificateCache, LogTracker, ServerStats};
-use crate::config::CtLogConfig;
+use crate::config::{CtLogConfig, StreamConfig};
 use crate::dedup::DedupFilter;
 use crate::models::{CertificateMessage, LeafCert, PreSerializedMessage};
 use crate::state::StateManager;
@@ -34,6 +34,7 @@ pub struct WatcherContext {
     pub shutdown: CancellationToken,
     pub dedup: Arc<DedupFilter>,
     pub rate_limiter: Option<OperatorRateLimiter>,
+    pub streams: Arc<StreamConfig>,
 }
 
 /// Issue #2: Build a CachedCert sharing the Arc<LeafCert> — zero field clones.
@@ -62,9 +63,10 @@ pub fn broadcast_cert(
     cached: CachedCert,
     stats: &ServerStats,
     messages_counter: &metrics::Counter,
+    streams: &StreamConfig,
 ) {
     cache.push(cached);
-    if let Some(serialized) = msg.pre_serialize() {
+    if let Some(serialized) = msg.pre_serialize(streams) {
         let msg_size =
             serialized.full.len() + serialized.lite.len() + serialized.domains_only.len();
         let _ = tx.send(serialized);

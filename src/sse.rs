@@ -56,9 +56,19 @@ pub async fn handle_sse_stream(
         return (StatusCode::TOO_MANY_REQUESTS, "Connection limit exceeded").into_response();
     }
 
-    let rx = state.tx.subscribe();
-    // Parse once at connection time; Copy type is free to move into the closure.
     let stream_type = SseStreamType::from_str(params.stream.as_deref().unwrap_or("lite"));
+
+    let stream_enabled = match stream_type {
+        SseStreamType::Full => state.streams.full,
+        SseStreamType::Lite => state.streams.lite,
+        SseStreamType::DomainsOnly => state.streams.domains_only,
+    };
+    if !stream_enabled {
+        state.limiter.release(ip);
+        return (StatusCode::NOT_FOUND, "Stream type not available").into_response();
+    }
+
+    let rx = state.tx.subscribe();
 
     SSE_CONNECTION_COUNT.fetch_add(1, Ordering::Relaxed);
     update_sse_metrics();

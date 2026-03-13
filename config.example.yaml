@@ -2,7 +2,7 @@ host: "0.0.0.0"
 port: 8080
 log_level: "info"
 buffer_size: 1000
-ct_logs_url: "https://www.gstatic.com/ct/log_list/v3/all_logs_list.json"
+ct_logs_url: "https://www.gstatic.com/ct/log_list/v3/log_list.json"
 
 protocols:
   websocket: true
@@ -10,6 +10,15 @@ protocols:
   metrics: true
   health: true
   example_json: true
+  api: false
+
+# Stream types to serialize and serve.
+# Disabling a stream type skips JSON serialization for that format
+# and removes its WebSocket/SSE route entirely, saving CPU and bandwidth.
+streams:
+  full: true          # Full stream (includes DER + chain, ~4-5 KB/cert)
+  lite: true          # Lite stream (no DER/chain, ~1 KB/cert)
+  domains_only: true  # Domains-only stream (~200 B/cert)
 
 ct_log:
   retry_max_attempts: 3
@@ -27,6 +36,9 @@ connection_limit:
   enabled: false
   max_connections: 10000
   per_ip_limit: null
+
+rate_limit:
+  enabled: false
 
 auth:
   enabled: false

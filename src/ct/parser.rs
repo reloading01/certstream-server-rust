@@ -41,7 +41,19 @@ const OID_ED25519: Oid<'static> = oid!(1.3.101.112);
 pub struct ParsedEntry {
     pub update_type: Cow<'static, str>,
     pub leaf_cert: LeafCert,
-    pub chain: Vec<ChainCert>,
+    /// Raw extra_data bytes and the offset where chain parsing should begin.
+    /// Chain parsing is deferred so that duplicate certificates (caught by the
+    /// dedup filter) never pay the cost of DER-parsing 2-4 chain certs.
+    chain_extra_bytes: Vec<u8>,
+    chain_offset: usize,
+}
+
+impl ParsedEntry {
+    /// Parse the certificate chain from the stored extra_data.
+    /// Call this only after confirming the leaf cert passes dedup filtering.
+    pub fn parse_chain(&self) -> Vec<ChainCert> {
+        parse_chain_from_bytes(&self.chain_extra_bytes, self.chain_offset)
+    }
 }
 
 pub fn parse_leaf_input(leaf_input: &str, extra_data: &str) -> Option<ParsedEntry> {
@@ -55,13 +67,13 @@ pub fn parse_leaf_input(leaf_input: &str, extra_data: &str) -> Option<ParsedEntr
     let entry_type = u16::from_be_bytes([leaf_bytes[10], leaf_bytes[11]]);
 
     match entry_type {
-        0 => parse_x509_entry(&leaf_bytes, &extra_bytes),
-        1 => parse_precert_entry(&extra_bytes),
+        0 => parse_x509_entry(&leaf_bytes, extra_bytes),
+        1 => parse_precert_entry(extra_bytes),
         _ => None,
     }
 }
 
-fn parse_x509_entry(leaf_bytes: &[u8], extra_bytes: &[u8]) -> Option<ParsedEntry> {
+fn parse_x509_entry(leaf_bytes: &[u8], extra_bytes: Vec<u8>) -> Option<ParsedEntry> {
     if leaf_bytes.len() < 15 {
         return None;
     }
@@ -78,16 +90,16 @@ fn parse_x509_entry(leaf_bytes: &[u8], extra_bytes: &[u8]) -> Option<ParsedEntry
 
     let cert_bytes = &cert_data[3..3 + cert_len];
     let leaf_cert = parse_certificate(cert_bytes, true)?;
-    let chain = parse_chain_from_bytes(extra_bytes, 0);
 
     Some(ParsedEntry {
         update_type: Cow::Borrowed("X509LogEntry"),
         leaf_cert,
-        chain,
+        chain_extra_bytes: extra_bytes,
+        chain_offset: 0,
     })
 }
 
-fn parse_precert_entry(extra_bytes: &[u8]) -> Option<ParsedEntry> {
+fn parse_precert_entry(extra_bytes: Vec<u8>) -> Option<ParsedEntry> {
     // RFC 6962: extra_data for precert contains:
     // - 3 bytes: pre-certificate length
     // - pre-certificate (full X509 with CT poison extension)
@@ -109,12 +121,12 @@ fn parse_precert_entry(extra_bytes: &[u8]) -> Option<ParsedEntry> {
     leaf_cert.extensions.ctl_poison_byte = true;
 
     let chain_offset = 3 + precert_len;
-    let chain = parse_chain_from_bytes(extra_bytes, chain_offset);
 
     Some(ParsedEntry {
         update_type: Cow::Borrowed("PrecertLogEntry"),
         leaf_cert,
-        chain,
+        chain_extra_bytes: extra_bytes,
+        chain_offset,
     })
 }
 

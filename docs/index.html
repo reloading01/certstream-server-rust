@@ -233,7 +233,7 @@
                 <p style="margin-top: 16px; color: #666; font-size: 0.875rem; text-align: center;">
                     Or try the community endpoint instantly:
                     <code style="background: #1a1a1a; padding: 2px 8px; border-radius: 4px; color: #60a5fa;">wss://api.certstream.dev/</code>
-                    — best-effort, rate limited, max 10 conn/IP
+                    — <a href="https://certstream.instatus.com" target="_blank" rel="noopener" style="color:#60a5fa;text-decoration:none;">status</a>
                 </p>
             </div>
         </section>
@@ -262,7 +262,6 @@
                             <span id="demo-status-text" style="font-family:'IBM Plex Mono',monospace;font-size:0.78rem;color:#666;">connecting…</span>
                         </div>
                         <div style="display:flex;align-items:center;gap:16px;">
-                            <span id="live-connections" style="font-family:'IBM Plex Mono',monospace;font-size:0.78rem;color:#555;" title="Active stream connections">— active <span id="live-conn-dot" style="display:inline-block;width:6px;height:6px;border-radius:50%;background:#555;vertical-align:middle;margin-left:2px;transition:background 0.3s;"></span></span>
                             <span id="demo-counter" style="font-family:'IBM Plex Mono',monospace;font-size:0.78rem;color:#555;">0 certs</span>
                             <button id="demo-toggle" onclick="demoToggle()" style="background:#1a1a1a;border:1px solid #333;color:#999;font-size:0.78rem;padding:4px 12px;border-radius:4px;cursor:pointer;font-family:'IBM Plex Mono',monospace;">Pause</button>
                         </div>
@@ -271,7 +270,7 @@
                         <div id="demo-inner" style="padding:8px 0;"></div>
                     </div>
                     <div style="background:#111;border-top:1px solid #222;padding:8px 16px;">
-                        <span style="font-family:'IBM Plex Mono',monospace;font-size:0.72rem;color:#333;">SSE · api.certstream.dev/sse · best-effort community endpoint</span>
+                        <span style="font-family:'IBM Plex Mono',monospace;font-size:0.72rem;color:#333;">SSE · api.certstream.dev/sse</span>
                     </div>
                 </div>
             </div>
@@ -496,22 +495,6 @@
 
             demoStart();
 
-            function fetchLiveConnections() {
-                fetch('https://api.certstream.dev/api/stats')
-                    .then(function(r) { return r.json(); })
-                    .then(function(d) {
-                        var n = d.connections && d.connections.total !== undefined ? d.connections.total : null;
-                        if (n !== null) {
-                            document.getElementById('live-connections').childNodes[0].textContent = n.toLocaleString() + ' active ';
-                            document.getElementById('live-conn-dot').style.background = '#4ade80';
-                        }
-                    })
-                    .catch(function() {
-                        document.getElementById('live-conn-dot').style.background = '#ef4444';
-                    });
-            }
-            fetchLiveConnections();
-            setInterval(fetchLiveConnections, 30000);
         </script>
 
         <section id="features">

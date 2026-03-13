@@ -4,6 +4,8 @@ use smallvec::SmallVec;
 use std::borrow::Cow;
 use std::sync::Arc;
 
+use crate::config::StreamConfig;
+
 pub type DomainList = SmallVec<[String; 4]>;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -161,35 +163,46 @@ pub struct PreSerializedMessage {
     pub domains_only: Bytes,
 }
 
+/// Serialize any `Serialize` value to JSON bytes.
+/// Uses simd-json when the `simd` feature is enabled, otherwise serde_json.
+#[inline]
+fn serialize_json<T: Serialize>(value: &T, _capacity_hint: usize) -> Option<Vec<u8>> {
+    #[cfg(feature = "simd")]
+    {
+        simd_json::to_vec(value).ok()
+    }
+    #[cfg(not(feature = "simd"))]
+    {
+        let mut buf = Vec::with_capacity(_capacity_hint);
+        serde_json::to_writer(&mut buf, value).ok()?;
+        Some(buf)
+    }
+}
+
 impl PreSerializedMessage {
-    pub fn from_certificate(msg: &CertificateMessage) -> Option<Self> {
-        #[cfg(feature = "simd")]
-        let (full, lite_buf, domains_buf) = {
-            let full = simd_json::to_vec(msg).ok()?;
-            let lite_msg = msg.to_lite();
-            let lite_buf = simd_json::to_vec(&lite_msg).ok()?;
-            let domains_msg = msg.to_domains_only();
-            let domains_buf = simd_json::to_vec(&domains_msg).ok()?;
-            (full, lite_buf, domains_buf)
+    pub fn from_certificate(msg: &CertificateMessage, streams: &StreamConfig) -> Option<Self> {
+        let full = if streams.full {
+            Bytes::from(serialize_json(msg, 4096)?)
+        } else {
+            Bytes::new()
         };
 
-        #[cfg(not(feature = "simd"))]
-        let (full, lite_buf, domains_buf) = {
-            let mut full = Vec::with_capacity(4096);
-            serde_json::to_writer(&mut full, msg).ok()?;
-            let lite_msg = msg.to_lite();
-            let mut lite_buf = Vec::with_capacity(2048);
-            serde_json::to_writer(&mut lite_buf, &lite_msg).ok()?;
-            let domains_msg = msg.to_domains_only();
-            let mut domains_buf = Vec::with_capacity(512);
-            serde_json::to_writer(&mut domains_buf, &domains_msg).ok()?;
-            (full, lite_buf, domains_buf)
+        let lite = if streams.lite {
+            Bytes::from(serialize_json(&msg.to_lite(), 2048)?)
+        } else {
+            Bytes::new()
+        };
+
+        let domains_only = if streams.domains_only {
+            Bytes::from(serialize_json(&msg.to_domains_only(), 512)?)
+        } else {
+            Bytes::new()
         };
 
         Some(Self {
-            full: Bytes::from(full),
-            lite: Bytes::from(lite_buf),
-            domains_only: Bytes::from(domains_buf),
+            full,
+            lite,
+            domains_only,
         })
     }
 }
@@ -262,8 +275,8 @@ impl CertificateMessage {
     }
 
     #[inline]
-    pub fn pre_serialize(self) -> Option<Arc<PreSerializedMessage>> {
-        PreSerializedMessage::from_certificate(&self).map(Arc::new)
+    pub fn pre_serialize(self, streams: &StreamConfig) -> Option<Arc<PreSerializedMessage>> {
+        PreSerializedMessage::from_certificate(&self, streams).map(Arc::new)
     }
 }
 
@@ -368,14 +381,14 @@ mod tests {
     #[test]
     fn test_pre_serialize_returns_some() {
         let msg = make_test_message();
-        let result = msg.pre_serialize();
+        let result = msg.pre_serialize(&StreamConfig::default());
         assert!(result.is_some());
     }
 
     #[test]
     fn test_pre_serialize_full_contains_certificate_update() {
         let msg = make_test_message();
-        let pre = msg.pre_serialize().unwrap();
+        let pre = msg.pre_serialize(&StreamConfig::default()).unwrap();
         let full_str = std::str::from_utf8(&pre.full).unwrap();
         assert!(full_str.contains("certificate_update"));
     }
@@ -383,7 +396,7 @@ mod tests {
     #[test]
     fn test_pre_serialize_lite_does_not_contain_chain() {
         let msg = make_test_message();
-        let pre = msg.pre_serialize().unwrap();
+        let pre = msg.pre_serialize(&StreamConfig::default()).unwrap();
         let lite_str = std::str::from_utf8(&pre.lite).unwrap();
         assert!(!lite_str.contains("\"chain\""));
     }
@@ -391,7 +404,7 @@ mod tests {
     #[test]
     fn test_pre_serialize_domains_contains_dns_entries() {
         let msg = make_test_message();
-        let pre = msg.pre_serialize().unwrap();
+        let pre = msg.pre_serialize(&StreamConfig::default()).unwrap();
         let domains_str = std::str::from_utf8(&pre.domains_only).unwrap();
         assert!(domains_str.contains("dns_entries"));
     }

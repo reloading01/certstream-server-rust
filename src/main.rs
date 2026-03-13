@@ -174,6 +174,17 @@ async fn main() {
     let tls_cert = config.tls_cert.clone();
     let tls_key = config.tls_key.clone();
     let protocols = config.protocols.clone();
+    let streams = Arc::new(config.streams.clone());
+
+    if !config.streams.full {
+        info!("full stream disabled by config");
+    }
+    if !config.streams.lite {
+        info!("lite stream disabled by config");
+    }
+    if !config.streams.domains_only {
+        info!("domains-only stream disabled by config");
+    }
 
     if !cli_args.dry_run {
         let watcher_ctx = WatcherContext {
@@ -187,6 +198,7 @@ async fn main() {
             shutdown: shutdown_token.clone(),
             dedup: dedup_filter.clone(),
             rate_limiter: None,
+            streams: streams.clone(),
         };
 
         spawn_rfc6962_watchers(&config, &log_tracker, &watcher_ctx).await;
@@ -429,10 +441,12 @@ fn build_router(protocols: &config::ProtocolConfig, config: &Config, deps: Route
         started_at,
         shutdown_token,
     } = deps;
+    let streams = Arc::new(config.streams.clone());
     let state = Arc::new(AppState {
         tx: tx.clone(),
         connections: ConnectionCounter::new(),
         limiter: connection_limiter.clone(),
+        streams: streams.clone(),
     });
     let auth_middleware_state = Arc::new(AuthMiddleware::new(
         &config.auth,
@@ -485,11 +499,17 @@ fn build_router(protocols: &config::ProtocolConfig, config: &Config, deps: Route
     }
 
     if protocols.websocket {
-        let ws_router = Router::new()
-            .route("/", get(handle_lite_stream))
-            .route("/full-stream", get(handle_full_stream))
-            .route("/domains-only", get(handle_domains_only))
-            .with_state(state.clone());
+        let mut ws_router = Router::new();
+        if streams.lite {
+            ws_router = ws_router.route("/", get(handle_lite_stream));
+        }
+        if streams.full {
+            ws_router = ws_router.route("/full-stream", get(handle_full_stream));
+        }
+        if streams.domains_only {
+            ws_router = ws_router.route("/domains-only", get(handle_domains_only));
+        }
+        let ws_router = ws_router.with_state(state.clone());
         protected_app = protected_app.merge(ws_router);
         info!("WebSocket protocol enabled");
     }
