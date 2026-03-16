@@ -5,7 +5,6 @@ A high-performance **certstream server** written in Rust. Monitors Certificate T
 [![GHCR](https://img.shields.io/badge/ghcr.io-reloading01%2Fcertstream--server--rust-blue?logo=github)](https://github.com/reloading01/certstream-server-rust/pkgs/container/certstream-server-rust)
 [![Rust](https://img.shields.io/badge/rust-1.88%2B-orange.svg)](https://www.rust-lang.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
-[![Docs](https://img.shields.io/badge/docs-certstream.dev-blue.svg)](https://certstream.dev/)
 
 ## What is Certstream?
 
@@ -44,26 +43,6 @@ Visit **[certstream.dev](https://certstream.dev/)** for:
 - Detailed API documentation
 - Client examples and integration guides
 - Self-hosting guide
-
-## Public API
-
-A free community endpoint is available at **`api.certstream.dev`**. Check **[certstream.instatus.com](https://certstream.instatus.com)** for current status.
-
-| Endpoint | Description |
-|----------|-------------|
-| `wss://api.certstream.dev/` | Lite WebSocket stream |
-| `wss://api.certstream.dev/full-stream` | Full stream (with DER and chain) |
-| `wss://api.certstream.dev/domains-only` | Domains only |
-| `https://api.certstream.dev/sse` | SSE stream |
-| `https://api.certstream.dev/api/stats` | Server statistics |
-| `https://api.certstream.dev/health` | Health check |
-| `https://certstream.instatus.com` | Status page (uptime, incidents) |
-
-```bash
-# Quick test
-websocat wss://api.certstream.dev/
-curl -N https://api.certstream.dev/sse
-```
 
 ## Quick Start
 
