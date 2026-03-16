@@ -85,8 +85,6 @@ Fixed by wiring `ApiState` directly to the real connection sources:
 ### Changes
 
 **Public API Documentation**
-- Added `api.certstream.dev` public endpoint documentation to README and all docs pages.
-- Added `certstream.instatus.com` status page links across the docs site.
 - Added live SSE demo with certificate detail modal to the homepage.
 - Added live active connections counter to the demo terminal (reads `/api/stats` every 30 s).
 - Added Google Analytics (GA4) to all docs pages.

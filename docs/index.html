@@ -34,49 +34,6 @@
     <script type="application/ld+json">
     {
         "@context": "https://schema.org",
-        "@type": "WebAPI",
-        "name": "Certstream Public API",
-        "description": "Free public certstream API for real-time Certificate Transparency log streaming. Connect via WebSocket or SSE to receive SSL/TLS certificates as they are issued.",
-        "url": "https://certstream.dev/docs.html",
-        "documentation": "https://certstream.dev/docs.html",
-        "termsOfService": "https://certstream.dev/docs.html",
-        "provider": {
-            "@type": "Person",
-            "name": "reloading01",
-            "url": "https://github.com/reloading01"
-        },
-        "offers": {
-            "@type": "Offer",
-            "price": "0",
-            "priceCurrency": "USD"
-        },
-        "serviceEndpoint": [
-            {
-                "@type": "EntryPoint",
-                "urlTemplate": "wss://api.certstream.dev/",
-                "description": "WebSocket lite stream — real-time SSL/TLS certificate transparency feed"
-            },
-            {
-                "@type": "EntryPoint",
-                "urlTemplate": "wss://api.certstream.dev/full-stream",
-                "description": "WebSocket full stream with DER and certificate chain"
-            },
-            {
-                "@type": "EntryPoint",
-                "urlTemplate": "wss://api.certstream.dev/domains-only",
-                "description": "WebSocket domains-only stream"
-            },
-            {
-                "@type": "EntryPoint",
-                "urlTemplate": "https://api.certstream.dev/sse",
-                "description": "Server-Sent Events certificate transparency stream"
-            }
-        ]
-    }
-    </script>
-    <script type="application/ld+json">
-    {
-        "@context": "https://schema.org",
         "@type": "SoftwareApplication",
         "name": "certstream-server-rust",
         "description": "High-performance Certificate Transparency log streaming server written in Rust",
@@ -139,7 +96,7 @@
                 "name": "Is there a free certstream API available?",
                 "acceptedAnswer": {
                     "@type": "Answer",
-                    "text": "Yes. A free public certstream API is available at api.certstream.dev for research and testing. Connect via WebSocket at wss://api.certstream.dev/ or SSE at https://api.certstream.dev/sse. Best-effort service, rate limited, max 10 connections per IP. For production workloads, self-host using the open-source certstream-server-rust."
+                    "text": "You can self-host certstream-server-rust for free using Docker. Run `docker run -d -p 8080:8080 ghcr.io/reloading01/certstream-server-rust:latest` and connect via WebSocket at ws://localhost:8080/ or SSE at http://localhost:8080/sse."
                 }
             },
             {
@@ -147,7 +104,7 @@
                 "name": "How do I connect to the certstream API?",
                 "acceptedAnswer": {
                     "@type": "Answer",
-                    "text": "Connect to wss://api.certstream.dev/ via WebSocket, or use `curl -N https://api.certstream.dev/sse` for Server-Sent Events. Python users can use the certstream library: certstream.listen_for_events(callback, url='wss://api.certstream.dev/'). No authentication required."
+                    "text": "Self-host with Docker, then connect to ws://localhost:8080/ via WebSocket, or use `curl -N http://localhost:8080/sse` for Server-Sent Events. Python users can use the certstream library: certstream.listen_for_events(callback, url='ws://localhost:8080/'). See the Quick Start guide for details."
                 }
             },
             {
@@ -230,272 +187,8 @@
                     <code>docker run -d -p 8080:8080 ghcr.io/reloading01/certstream-server-rust:latest</code>
                     <button onclick="navigator.clipboard.writeText('docker run -d -p 8080:8080 ghcr.io/reloading01/certstream-server-rust:latest');this.textContent='Copied!'">Copy</button>
                 </div>
-                <p style="margin-top: 16px; color: #666; font-size: 0.875rem; text-align: center;">
-                    Or try the community endpoint instantly:
-                    <code style="background: #1a1a1a; padding: 2px 8px; border-radius: 4px; color: #60a5fa;">wss://api.certstream.dev/</code>
-                    — <a href="https://certstream.instatus.com" target="_blank" rel="noopener" style="color:#60a5fa;text-decoration:none;">status</a>
-                </p>
             </div>
         </section>
-
-        <!-- Cert detail modal -->
-        <div id="cert-modal" style="display:none;position:fixed;inset:0;z-index:1000;background:rgba(0,0,0,0.75);backdrop-filter:blur(4px);align-items:center;justify-content:center;padding:20px;">
-            <div style="background:#111;border:1px solid #2a2a2a;border-radius:12px;width:100%;max-width:680px;max-height:85vh;display:flex;flex-direction:column;overflow:hidden;">
-                <div style="padding:16px 20px;border-bottom:1px solid #1e1e1e;display:flex;align-items:center;justify-content:space-between;flex-shrink:0;">
-                    <span id="modal-title" style="font-family:'IBM Plex Mono',monospace;font-size:0.82rem;color:#60a5fa;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:calc(100% - 40px);"></span>
-                    <button onclick="certModalClose()" style="background:none;border:none;color:#555;font-size:1.4rem;cursor:pointer;line-height:1;flex-shrink:0;padding:0 0 0 12px;">&times;</button>
-                </div>
-                <div id="modal-body" style="overflow-y:auto;padding:20px;display:grid;gap:16px;"></div>
-            </div>
-        </div>
-
-        <section id="live-demo">
-            <div class="wrap">
-                <div class="section-header">
-                    <h2>Live Certificate Stream</h2>
-                    <p>Real-time feed from <code style="background:#1a1a1a;padding:2px 8px;border-radius:4px;color:#60a5fa;font-size:0.85em;">api.certstream.dev</code> — click any row for details</p>
-                </div>
-                <div style="border:1px solid #222;border-radius:10px;overflow:hidden;max-width:900px;margin:0 auto;">
-                    <div style="background:#111;border-bottom:1px solid #222;padding:12px 16px;display:flex;align-items:center;justify-content:space-between;gap:12px;">
-                        <div style="display:flex;align-items:center;gap:10px;">
-                            <span id="demo-dot" style="width:8px;height:8px;border-radius:50%;background:#ef4444;flex-shrink:0;transition:background 0.3s;"></span>
-                            <span id="demo-status-text" style="font-family:'IBM Plex Mono',monospace;font-size:0.78rem;color:#666;">connecting…</span>
-                        </div>
-                        <div style="display:flex;align-items:center;gap:16px;">
-                            <span id="demo-counter" style="font-family:'IBM Plex Mono',monospace;font-size:0.78rem;color:#555;">0 certs</span>
-                            <button id="demo-toggle" onclick="demoToggle()" style="background:#1a1a1a;border:1px solid #333;color:#999;font-size:0.78rem;padding:4px 12px;border-radius:4px;cursor:pointer;font-family:'IBM Plex Mono',monospace;">Pause</button>
-                        </div>
-                    </div>
-                    <div id="demo-feed" style="height:320px;overflow:hidden;position:relative;background:#0a0a0a;">
-                        <div id="demo-inner" style="padding:8px 0;"></div>
-                    </div>
-                    <div style="background:#111;border-top:1px solid #222;padding:8px 16px;">
-                        <span style="font-family:'IBM Plex Mono',monospace;font-size:0.72rem;color:#333;">SSE · api.certstream.dev/sse</span>
-                    </div>
-                </div>
-            </div>
-        </section>
-        <style>
-            .demo-entry { display:flex; align-items:baseline; gap:10px; padding:4px 16px; font-family:'IBM Plex Mono',monospace; font-size:0.78rem; line-height:1.5; border-bottom:1px solid #0f0f0f; animation:fadeIn 0.25s ease; cursor:pointer; }
-            .demo-entry:hover { background:#111; }
-            .demo-ts { color:#333; flex-shrink:0; font-size:0.7rem; }
-            .demo-issuer { color:#f97316; flex-shrink:0; max-width:120px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-            .demo-domains { color:#e8e8e8; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; flex:1; }
-            .demo-domains span { color:#60a5fa; }
-            .demo-source { color:#333; flex-shrink:0; font-size:0.7rem; max-width:130px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-            .demo-more { color:#555; font-size:0.7rem; flex-shrink:0; }
-            @keyframes fadeIn { from { opacity:0; transform:translateY(-4px); } to { opacity:1; transform:translateY(0); } }
-            .modal-section { background:#0d0d0d; border:1px solid #1e1e1e; border-radius:8px; padding:14px 16px; }
-            .modal-section-title { font-family:'IBM Plex Mono',monospace; font-size:0.7rem; color:#555; text-transform:uppercase; letter-spacing:0.08em; margin-bottom:10px; }
-            .modal-field { display:grid; grid-template-columns:140px 1fr; gap:6px 12px; margin-bottom:6px; font-family:'IBM Plex Mono',monospace; font-size:0.75rem; }
-            .modal-field:last-child { margin-bottom:0; }
-            .modal-key { color:#555; }
-            .modal-val { color:#e8e8e8; word-break:break-all; }
-            .modal-val.hl { color:#60a5fa; }
-            .modal-val.orange { color:#f97316; }
-            .modal-tag { display:inline-block; background:#1a1a1a; border:1px solid #2a2a2a; border-radius:4px; padding:1px 7px; margin:2px 2px 2px 0; font-size:0.72rem; color:#e8e8e8; }
-            #cert-modal.open { display:flex; }
-        </style>
-        <script>
-            var demoEs = null, demoPaused = false, demoCount = 0;
-            var demoCertStore = {};
-
-            function demoStart() {
-                if (demoEs) demoEs.close();
-                demoEs = new EventSource('https://api.certstream.dev/sse');
-                demoEs.onopen = function() {
-                    document.getElementById('demo-dot').style.background = '#4ade80';
-                    document.getElementById('demo-status-text').textContent = 'live';
-                };
-                demoEs.onerror = function() {
-                    document.getElementById('demo-dot').style.background = '#ef4444';
-                    document.getElementById('demo-status-text').textContent = 'reconnecting…';
-                };
-                demoEs.onmessage = function(e) {
-                    if (demoPaused) return;
-                    try {
-                        var msg = JSON.parse(e.data);
-                        if (msg.message_type !== 'certificate_update') return;
-                        var lc = msg.data.leaf_cert;
-                        var domains = lc.all_domains || [];
-                        if (!domains.length) return;
-                        demoCount++;
-                        document.getElementById('demo-counter').textContent = demoCount.toLocaleString() + ' certs';
-                        var ts = new Date();
-                        var hh = String(ts.getHours()).padStart(2,'0');
-                        var mm = String(ts.getMinutes()).padStart(2,'0');
-                        var ss = String(ts.getSeconds()).padStart(2,'0');
-                        var issuerLabel = (lc.issuer && (lc.issuer.O || lc.issuer.CN)) || '?';
-                        var issuerShort = issuerLabel.length > 18 ? issuerLabel.slice(0,16)+'…' : issuerLabel;
-                        var primary = domains[0];
-                        var extra = domains.length > 1 ? domains.length - 1 : 0;
-                        var source = (msg.data.source && msg.data.source.name) || '';
-                        var sourceShort = source.length > 18 ? source.slice(0,16)+'…' : source;
-                        var id = 'c' + demoCount;
-                        demoCertStore[id] = msg.data;
-                        var row = document.createElement('div');
-                        row.className = 'demo-entry';
-                        row.dataset.id = id;
-                        row.innerHTML =
-                            '<span class="demo-ts">' + hh+':'+mm+':'+ss + '</span>' +
-                            '<span class="demo-issuer">' + escHtml(issuerShort) + '</span>' +
-                            '<span class="demo-domains"><span>' + escHtml(primary) + '</span></span>' +
-                            (extra ? '<span class="demo-more">+'+extra+'</span>' : '') +
-                            '<span class="demo-source">' + escHtml(sourceShort) + '</span>';
-                        row.addEventListener('click', function() { certModalOpen(this.dataset.id); });
-                        var inner = document.getElementById('demo-inner');
-                        inner.insertBefore(row, inner.firstChild);
-                        if (inner.children.length > 80) {
-                            var last = inner.lastChild;
-                            if (last && last.dataset && last.dataset.id) delete demoCertStore[last.dataset.id];
-                            inner.removeChild(last);
-                        }
-                    } catch(err) {}
-                };
-            }
-
-            function escHtml(s) {
-                return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-            }
-
-            function fmtDate(ts) {
-                if (!ts) return '—';
-                return new Date(ts * 1000).toISOString().replace('T',' ').slice(0,19) + ' UTC';
-            }
-
-            function certModalOpen(id) {
-                var d = demoCertStore[id];
-                if (!d) return;
-                var lc = d.leaf_cert;
-                var domains = lc.all_domains || [];
-                document.getElementById('modal-title').textContent = domains[0] || '(unknown)';
-                var body = document.getElementById('modal-body');
-                body.innerHTML = '';
-
-                function section(title, fields) {
-                    var s = document.createElement('div');
-                    s.className = 'modal-section';
-                    var t = document.createElement('div');
-                    t.className = 'modal-section-title';
-                    t.textContent = title;
-                    s.appendChild(t);
-                    fields.forEach(function(f) {
-                        if (!f[1] && f[1] !== 0 && f[1] !== false) return;
-                        var row = document.createElement('div');
-                        row.className = 'modal-field';
-                        var k = document.createElement('span');
-                        k.className = 'modal-key';
-                        k.textContent = f[0];
-                        var v = document.createElement('span');
-                        v.className = 'modal-val' + (f[2] ? ' ' + f[2] : '');
-                        v.textContent = f[1];
-                        row.appendChild(k);
-                        row.appendChild(v);
-                        s.appendChild(row);
-                    });
-                    body.appendChild(s);
-                }
-
-                // Domains
-                var ds = document.createElement('div');
-                ds.className = 'modal-section';
-                var dt = document.createElement('div');
-                dt.className = 'modal-section-title';
-                dt.textContent = 'Domains (' + domains.length + ')';
-                ds.appendChild(dt);
-                var dtags = document.createElement('div');
-                domains.forEach(function(d2) {
-                    var tag = document.createElement('span');
-                    tag.className = 'modal-tag';
-                    tag.textContent = d2;
-                    dtags.appendChild(tag);
-                });
-                ds.appendChild(dtags);
-                body.appendChild(ds);
-
-                // Subject & Issuer
-                var subj = lc.subject || {};
-                var iss = lc.issuer || {};
-                section('Subject', [
-                    ['CN', subj.CN, 'hl'],
-                    ['O', subj.O],
-                    ['C', subj.C],
-                    ['aggregated', subj.aggregated]
-                ]);
-                section('Issuer', [
-                    ['CN', iss.CN, 'orange'],
-                    ['O', iss.O, 'orange'],
-                    ['C', iss.C],
-                    ['aggregated', iss.aggregated]
-                ]);
-
-                // Validity
-                section('Validity', [
-                    ['Not Before', fmtDate(lc.not_before)],
-                    ['Not After', fmtDate(lc.not_after)]
-                ]);
-
-                // Fingerprints
-                section('Fingerprints', [
-                    ['SHA-256', lc.sha256],
-                    ['SHA-1', lc.sha1],
-                    ['Fingerprint', lc.fingerprint],
-                    ['Serial', lc.serial_number],
-                    ['Algorithm', lc.signature_algorithm],
-                    ['Is CA', lc.is_ca !== undefined ? String(lc.is_ca) : null]
-                ]);
-
-                // Extensions
-                var ext = lc.extensions || {};
-                var extFields = Object.keys(ext).map(function(k) { return [k, ext[k]]; });
-                if (extFields.length) section('Extensions', extFields);
-
-                // Source
-                section('Source', [
-                    ['Log', (d.source && d.source.name) || '—'],
-                    ['URL', (d.source && d.source.url) || '—'],
-                    ['Index', d.cert_index !== undefined ? String(d.cert_index) : '—'],
-                    ['Seen', d.seen ? fmtDate(Math.floor(d.seen)) : '—']
-                ]);
-
-                var modal = document.getElementById('cert-modal');
-                modal.classList.add('open');
-                modal.style.display = 'flex';
-            }
-
-            function certModalClose() {
-                var modal = document.getElementById('cert-modal');
-                modal.classList.remove('open');
-                modal.style.display = 'none';
-            }
-
-            document.getElementById('cert-modal').addEventListener('click', function(e) {
-                if (e.target === this) certModalClose();
-            });
-
-            document.addEventListener('keydown', function(e) {
-                if (e.key === 'Escape') certModalClose();
-            });
-
-            function demoToggle() {
-                demoPaused = !demoPaused;
-                var btn = document.getElementById('demo-toggle');
-                var dot = document.getElementById('demo-dot');
-                var txt = document.getElementById('demo-status-text');
-                if (demoPaused) {
-                    btn.textContent = 'Resume';
-                    dot.style.background = '#f59e0b';
-                    txt.textContent = 'paused';
-                } else {
-                    btn.textContent = 'Pause';
-                    dot.style.background = '#4ade80';
-                    txt.textContent = 'live';
-                }
-            }
-
-            demoStart();
-
-        </script>
 
         <section id="features">
             <div class="wrap">
@@ -580,29 +273,6 @@
 
     </main>
 
-        <section id="public-api">
-            <div class="wrap">
-                <div class="section-header">
-                    <h2>Free Certstream API</h2>
-                    <p>Public endpoint for research, testing, and security tooling — no setup required</p>
-                </div>
-                <div class="features-list">
-                    <div class="feature-item">
-                        <h3>WebSocket stream</h3>
-                        <p>Connect to <code>wss://api.certstream.dev/</code> for a real-time feed of every newly issued SSL/TLS certificate. Use <code>/full-stream</code> for DER and chain data, or <code>/domains-only</code> for minimal bandwidth.</p>
-                    </div>
-                    <div class="feature-item">
-                        <h3>SSE stream</h3>
-                        <p>No WebSocket client? Use <code>https://api.certstream.dev/sse</code> — works with <code>curl</code>, browsers, and any HTTP client that supports Server-Sent Events.</p>
-                    </div>
-                    <div class="feature-item">
-                        <h3>Zero setup</h3>
-                        <p>No API key, no registration. Community endpoint. Best-effort, rate limited, max 10 connections per IP. For production, <a href="quickstart.html">self-host in seconds with Docker</a>. Check availability at <a href="https://certstream.instatus.com" target="_blank" rel="noopener">certstream.instatus.com</a>.</p>
-                    </div>
-                </div>
-            </div>
-        </section>
-
     <footer>
         <div class="wrap">
             <div class="links">
@@ -611,7 +281,6 @@
                 <a href="docs.html">Documentation</a>
                 <a href="https://github.com/reloading01/certstream-server-rust/issues" target="_blank" rel="noopener">Issues</a>
                 <a href="https://github.com/reloading01/certstream-server-rust/blob/main/LICENSE" target="_blank" rel="noopener">MIT License</a>
-                <a href="https://certstream.instatus.com" target="_blank" rel="noopener">Status</a>
             </div>
             <p>certstream-server-rust</p>
         </div>

@@ -38,13 +38,7 @@
             "name": "reloading01",
             "url": "https://github.com/reloading01"
         },
-        "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
-        "serviceEndpoint": [
-            { "@type": "EntryPoint", "urlTemplate": "wss://api.certstream.dev/", "description": "Certstream lite WebSocket API" },
-            { "@type": "EntryPoint", "urlTemplate": "wss://api.certstream.dev/full-stream", "description": "Certstream full WebSocket API" },
-            { "@type": "EntryPoint", "urlTemplate": "wss://api.certstream.dev/domains-only", "description": "Certstream domains-only WebSocket API" },
-            { "@type": "EntryPoint", "urlTemplate": "https://api.certstream.dev/sse", "description": "Certstream SSE API" }
-        ]
+        "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" }
     }
     </script>
     <script type="application/ld+json">
@@ -127,89 +121,6 @@
                         </ul>
                     </div>
                 </div>
-            </div>
-        </section>
-
-        <section>
-            <div class="wrap">
-                <div class="section-header">
-                    <h2>Public API</h2>
-                    <p>Community endpoint for research and testing</p>
-                </div>
-                <div class="info-box" style="background:#1a1a1a;border:1px solid #333;border-radius:8px;padding:20px 24px;margin-bottom:24px;max-width:none;">
-                    <p style="margin:0;color:#999;line-height:1.6;">
-                        <strong style="color:#f59e0b;">Best-effort.</strong>
-                        A community instance is available at <code style="background:#0d0d0d;padding:2px 6px;border-radius:4px;color:#60a5fa;">api.certstream.dev</code> for exploration and testing.
-                        Check <a href="https://certstream.instatus.com" target="_blank" rel="noopener" style="color:#60a5fa;">certstream.instatus.com</a> for current status.
-                        For production workloads, <a href="quickstart.html" style="color:#b7410e;">self-host your own instance</a>.
-                    </p>
-                </div>
-                <table class="endpoints-table">
-                    <thead>
-                        <tr>
-                            <th>Endpoint</th>
-                            <th>Protocol</th>
-                            <th>Description</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        <tr>
-                            <td><code>wss://api.certstream.dev/</code></td>
-                            <td>WebSocket</td>
-                            <td>Lite stream (no DER/chain data)</td>
-                        </tr>
-                        <tr>
-                            <td><code>wss://api.certstream.dev/full-stream</code></td>
-                            <td>WebSocket</td>
-                            <td>Full stream with DER and certificate chain</td>
-                        </tr>
-                        <tr>
-                            <td><code>wss://api.certstream.dev/domains-only</code></td>
-                            <td>WebSocket</td>
-                            <td>Domain names only (minimal data)</td>
-                        </tr>
-                        <tr>
-                            <td><code>https://api.certstream.dev/sse</code></td>
-                            <td>SSE</td>
-                            <td>Server-Sent Events lite stream</td>
-                        </tr>
-                        <tr>
-                            <td><code>https://api.certstream.dev/sse?stream=full</code></td>
-                            <td>SSE</td>
-                            <td>Server-Sent Events full stream</td>
-                        </tr>
-                        <tr>
-                            <td><code>https://api.certstream.dev/sse?stream=domains</code></td>
-                            <td>SSE</td>
-                            <td>Server-Sent Events domains only</td>
-                        </tr>
-                        <tr>
-                            <td><code>https://api.certstream.dev/api/stats</code></td>
-                            <td>HTTP</td>
-                            <td>Server statistics (requires <code>CERTSTREAM_API_ENABLED=true</code>)</td>
-                        </tr>
-                        <tr>
-                            <td><code>https://api.certstream.dev/health</code></td>
-                            <td>HTTP</td>
-                            <td>Basic health check (returns "OK")</td>
-                        </tr>
-                        <tr>
-                            <td><code>https://api.certstream.dev/health/deep</code></td>
-                            <td>HTTP</td>
-                            <td>Detailed health with log status, connections, uptime (JSON)</td>
-                        </tr>
-                        <tr>
-                            <td><code><a href="https://certstream.instatus.com" target="_blank" rel="noopener" style="color:inherit;">https://certstream.instatus.com</a></code></td>
-                            <td>HTTP</td>
-                            <td>Status page — uptime history, incidents, response times</td>
-                        </tr>
-                        <tr>
-                            <td><code>https://api.certstream.dev/example.json</code></td>
-                            <td>HTTP</td>
-                            <td>Sample message format</td>
-                        </tr>
-                    </tbody>
-                </table>
             </div>
         </section>
 
@@ -336,7 +247,7 @@
                             <span class="lang">JavaScript</span>
                             <span class="tag">Browser</span>
                         </div>
-                        <pre><span class="kw">const</span> ws = <span class="kw">new</span> <span class="fn">WebSocket</span>(<span class="str">'wss://api.certstream.dev/'</span>);
+                        <pre><span class="kw">const</span> ws = <span class="kw">new</span> <span class="fn">WebSocket</span>(<span class="str">'ws://localhost:8080/'</span>);
 
 ws.<span class="fn">onmessage</span> = (event) => {
     <span class="kw">const</span> data = <span class="var">JSON</span>.<span class="fn">parse</span>(event.data);
@@ -351,13 +262,13 @@ ws.<span class="fn">onmessage</span> = (event) => {
                             <span class="tag">SSE</span>
                         </div>
                         <pre><span class="cm"># Lite stream</span>
-curl -N https://api.certstream.dev/sse
+curl -N http://localhost:8080/sse
 
 <span class="cm"># Full stream</span>
-curl -N "https://api.certstream.dev/sse?stream=full"
+curl -N "http://localhost:8080/sse?stream=full"
 
 <span class="cm"># Domains only</span>
-curl -N "https://api.certstream.dev/sse?stream=domains"</pre>
+curl -N "http://localhost:8080/sse?stream=domains"</pre>
                     </div>
                 </div>
             </div>
@@ -926,7 +837,7 @@ docker compose up -d</pre>
                 <a href="docs.html">Documentation</a>
                 <a href="https://github.com/reloading01/certstream-server-rust/issues" target="_blank" rel="noopener">Issues</a>
                 <a href="https://github.com/reloading01/certstream-server-rust/blob/main/LICENSE" target="_blank" rel="noopener">MIT License</a>
-                <a href="https://certstream.instatus.com" target="_blank" rel="noopener">Status</a>
+
             </div>
             <p>certstream-server-rust</p>
         </div>

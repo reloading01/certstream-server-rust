@@ -90,51 +90,6 @@
         <section>
             <div class="wrap">
                 <div class="section-header">
-                    <h2>Public API (No Setup Required)</h2>
-                    <p>Try it immediately — no server needed</p>
-                </div>
-                <div style="background:#1a1a1a;border:1px solid #333;border-radius:8px;padding:20px 24px;margin-bottom:24px;">
-                    <p style="margin:0 0 12px 0;color:#999;line-height:1.6;">
-                        A community instance is available at
-                        <code style="background:#0d0d0d;padding:2px 6px;border-radius:4px;color:#60a5fa;">api.certstream.dev</code>
-                        for exploration and testing.
-                        <strong style="color:#f59e0b;">Best-effort, no uptime guarantee.</strong>
-                        Check status at
-                        Live status: <a href="https://certstream.instatus.com" target="_blank" rel="noopener" style="color:#60a5fa;">certstream.instatus.com</a>.
-                    </p>
-                </div>
-                <div class="code-examples">
-                    <div class="code-example">
-                        <div class="code-example-header">
-                            <span class="lang">WebSocket</span>
-                        </div>
-                        <pre>websocat wss://api.certstream.dev/</pre>
-                    </div>
-                    <div class="code-example">
-                        <div class="code-example-header">
-                            <span class="lang">SSE</span>
-                        </div>
-                        <pre>curl -N https://api.certstream.dev/sse</pre>
-                    </div>
-                    <div class="code-example">
-                        <div class="code-example-header">
-                            <span class="lang">Health</span>
-                        </div>
-                        <pre>curl https://api.certstream.dev/health/deep</pre>
-                    </div>
-                    <div class="code-example">
-                        <div class="code-example-header">
-                            <span class="lang">Stats</span>
-                        </div>
-                        <pre>curl https://api.certstream.dev/api/stats</pre>
-                    </div>
-                </div>
-            </div>
-        </section>
-
-        <section>
-            <div class="wrap">
-                <div class="section-header">
                     <h2>Self-Host</h2>
                     <p>Run your own instance for production workloads</p>
                 </div>
@@ -177,13 +132,13 @@ def callback(message, context):
         domains = message["data"]["leaf_cert"]["all_domains"]
         print(domains)
 
-certstream.listen_for_events(callback, url="wss://api.certstream.dev/")</pre>
+certstream.listen_for_events(callback, url="ws://localhost:8080/")</pre>
                     </div>
                     <div class="code-example">
                         <div class="code-example-header">
                             <span class="lang">JavaScript</span>
                         </div>
-                        <pre>const ws = new WebSocket("wss://api.certstream.dev/");
+                        <pre>const ws = new WebSocket("ws://localhost:8080/");
 
 ws.onmessage = (event) => {
     const data = JSON.parse(event.data);
@@ -196,20 +151,20 @@ ws.onmessage = (event) => {
                         <div class="code-example-header">
                             <span class="lang">cURL</span>
                         </div>
-                        <pre>curl -N https://api.certstream.dev/sse</pre>
+                        <pre>curl -N http://localhost:8080/sse</pre>
                     </div>
                     <div class="code-example">
                         <div class="code-example-header">
                             <span class="lang">websocat</span>
                         </div>
-                        <pre>websocat wss://api.certstream.dev/</pre>
+                        <pre>websocat ws://localhost:8080/</pre>
                     </div>
                     <div class="code-example">
                         <div class="code-example-header">
                             <span class="lang">JavaScript</span>
                             <span class="tag">Domains-only stream</span>
                         </div>
-                        <pre>const ws = new WebSocket("wss://api.certstream.dev/domains-only");
+                        <pre>const ws = new WebSocket("ws://localhost:8080/domains-only");
 
 ws.onmessage = (event) => {
     const msg = JSON.parse(event.data);
@@ -223,7 +178,7 @@ ws.onmessage = (event) => {
                 </div>
                 <p style="margin-top: 16px; color: #666; font-size: 0.9rem; text-align: center;">
                     The <code>/domains-only</code> stream uses <code>message_type: "dns_entries"</code> and <code>data</code> is a bare string array.
-                    For SSE, use <code>curl -N https://api.certstream.dev/sse?stream=domains</code>.
+                    For SSE, use <code>curl -N http://localhost:8080/sse?stream=domains</code>.
                 </p>
             </div>
         </section>
@@ -261,7 +216,7 @@ ws.onmessage = (event) => {
                 <a href="docs.html">Documentation</a>
                 <a href="https://github.com/reloading01/certstream-server-rust/issues" target="_blank" rel="noopener">Issues</a>
                 <a href="https://github.com/reloading01/certstream-server-rust/blob/main/LICENSE" target="_blank" rel="noopener">MIT License</a>
-                <a href="https://certstream.instatus.com" target="_blank" rel="noopener">Status</a>
+
             </div>
             <p>certstream-server-rust</p>
         </div>
