@@ -41,6 +41,10 @@ const OID_ED25519: Oid<'static> = oid!(1.3.101.112);
 pub struct ParsedEntry {
     pub update_type: Cow<'static, str>,
     pub leaf_cert: LeafCert,
+    /// CT log timestamp from the leaf_input MerkleTreeLeaf structure (RFC 6962).
+    /// Bytes 2–9 of the decoded leaf_input, interpreted as a uint64 big-endian
+    /// milliseconds value, converted to seconds with millisecond precision.
+    pub timestamp: f64,
     /// Raw extra_data bytes and the offset where chain parsing should begin.
     /// Chain parsing is deferred so that duplicate certificates (caught by the
     /// dedup filter) never pay the cost of DER-parsing 2-4 chain certs.
@@ -64,16 +68,32 @@ pub fn parse_leaf_input(leaf_input: &str, extra_data: &str) -> Option<ParsedEntr
         return None;
     }
 
+    // The length check above (< 15) guarantees at least 15 bytes, so indexing
+    // into [2..10] (the 8-byte timestamp) and [10..12] (the entry type) is safe.
+    // RFC 6962 MerkleTreeLeaf: byte 0 = version, byte 1 = leaf_type,
+    // bytes 2–9 = uint64 big-endian timestamp (milliseconds since Unix epoch).
+    let ts_ms = u64::from_be_bytes([
+        leaf_bytes[2],
+        leaf_bytes[3],
+        leaf_bytes[4],
+        leaf_bytes[5],
+        leaf_bytes[6],
+        leaf_bytes[7],
+        leaf_bytes[8],
+        leaf_bytes[9],
+    ]);
+    let timestamp = ts_ms as f64 / 1000.0;
+
     let entry_type = u16::from_be_bytes([leaf_bytes[10], leaf_bytes[11]]);
 
     match entry_type {
-        0 => parse_x509_entry(&leaf_bytes, extra_bytes),
-        1 => parse_precert_entry(extra_bytes),
+        0 => parse_x509_entry(&leaf_bytes, extra_bytes, timestamp),
+        1 => parse_precert_entry(extra_bytes, timestamp),
         _ => None,
     }
 }
 
-fn parse_x509_entry(leaf_bytes: &[u8], extra_bytes: Vec<u8>) -> Option<ParsedEntry> {
+fn parse_x509_entry(leaf_bytes: &[u8], extra_bytes: Vec<u8>, timestamp: f64) -> Option<ParsedEntry> {
     if leaf_bytes.len() < 15 {
         return None;
     }
@@ -94,12 +114,13 @@ fn parse_x509_entry(leaf_bytes: &[u8], extra_bytes: Vec<u8>) -> Option<ParsedEnt
     Some(ParsedEntry {
         update_type: Cow::Borrowed("X509LogEntry"),
         leaf_cert,
+        timestamp,
         chain_extra_bytes: extra_bytes,
         chain_offset: 0,
     })
 }
 
-fn parse_precert_entry(extra_bytes: Vec<u8>) -> Option<ParsedEntry> {
+fn parse_precert_entry(extra_bytes: Vec<u8>, timestamp: f64) -> Option<ParsedEntry> {
     // RFC 6962: extra_data for precert contains:
     // - 3 bytes: pre-certificate length
     // - pre-certificate (full X509 with CT poison extension)
@@ -125,6 +146,7 @@ fn parse_precert_entry(extra_bytes: Vec<u8>) -> Option<ParsedEntry> {
     Some(ParsedEntry {
         update_type: Cow::Borrowed("PrecertLogEntry"),
         leaf_cert,
+        timestamp,
         chain_extra_bytes: extra_bytes,
         chain_offset,
     })

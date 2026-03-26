@@ -149,6 +149,7 @@ pub async fn example_json() -> Json<CertificateMessage> {
             cert_index: 123456789,
             cert_link: "https://ct.googleapis.com/logs/us1/argon2025h2/ct/v1/get-entries?start=123456789&end=123456789".to_string(),
             seen: 1704067200.123,
+            timestamp: 1704000000.0,
             source: Arc::new(Source {
                 name: Arc::from("Google 'Argon2024' log"),
                 url: Arc::from("https://ct.googleapis.com/logs/argon2024"),
