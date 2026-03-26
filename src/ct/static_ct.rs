@@ -724,6 +724,7 @@ pub async fn run_static_ct_watcher(log: CtLog, ctx: WatcherContext) {
                                         cert_index,
                                         cert_link,
                                         seen,
+                                        timestamp: leaf.timestamp as f64 / 1000.0,
                                         source: Arc::clone(&source),
                                     },
                                 };
