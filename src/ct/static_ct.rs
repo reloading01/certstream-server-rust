@@ -26,7 +26,7 @@ pub struct Checkpoint {
 #[derive(Debug)]
 #[allow(dead_code)]
 pub struct TileLeaf {
-    pub timestamp: u64,
+    pub submission_timestamp: u64,
     pub entry_type: u16,
     pub cert_der: Vec<u8>,
     pub is_precert: bool,
@@ -179,7 +179,7 @@ fn parse_one_leaf(data: &[u8], offset: &mut usize) -> Option<TileLeaf> {
         return None;
     }
 
-    let timestamp = u64::from_be_bytes(data[*offset..*offset + 8].try_into().ok()?);
+    let submission_timestamp = u64::from_be_bytes(data[*offset..*offset + 8].try_into().ok()?);
     *offset += 8;
 
     let entry_type = u16::from_be_bytes(data[*offset..*offset + 2].try_into().ok()?);
@@ -259,7 +259,7 @@ fn parse_one_leaf(data: &[u8], offset: &mut usize) -> Option<TileLeaf> {
         }
 
         return Some(TileLeaf {
-            timestamp,
+            submission_timestamp,
             entry_type,
             cert_der,
             is_precert,
@@ -297,7 +297,7 @@ fn parse_one_leaf(data: &[u8], offset: &mut usize) -> Option<TileLeaf> {
     }
 
     Some(TileLeaf {
-        timestamp,
+        submission_timestamp,
         entry_type,
         cert_der,
         is_precert,
@@ -724,6 +724,7 @@ pub async fn run_static_ct_watcher(log: CtLog, ctx: WatcherContext) {
                                         cert_index,
                                         cert_link,
                                         seen,
+                                        submission_timestamp: leaf.submission_timestamp as f64 / 1000.0,
                                         source: Arc::clone(&source),
                                     },
                                 };
@@ -982,7 +983,7 @@ mod tests {
 
         let leaves = parse_tile_leaves(&data);
         assert_eq!(leaves.len(), 1);
-        assert_eq!(leaves[0].timestamp, 1700000000000);
+        assert_eq!(leaves[0].submission_timestamp, 1700000000000);
         assert_eq!(leaves[0].entry_type, 0);
         assert!(!leaves[0].is_precert);
         assert_eq!(leaves[0].cert_der, cert);
@@ -1001,7 +1002,7 @@ mod tests {
 
         let leaves = parse_tile_leaves(&data);
         assert_eq!(leaves.len(), 1);
-        assert_eq!(leaves[0].timestamp, 1700000001000);
+        assert_eq!(leaves[0].submission_timestamp, 1700000001000);
         assert_eq!(leaves[0].entry_type, 1);
         assert!(leaves[0].is_precert);
         assert_eq!(leaves[0].cert_der, precert);
@@ -1022,16 +1023,16 @@ mod tests {
         let leaves = parse_tile_leaves(&data);
         assert_eq!(leaves.len(), 3);
 
-        assert_eq!(leaves[0].timestamp, 1000);
+        assert_eq!(leaves[0].submission_timestamp, 1000);
         assert!(!leaves[0].is_precert);
         assert_eq!(leaves[0].cert_der, b"cert1");
 
-        assert_eq!(leaves[1].timestamp, 2000);
+        assert_eq!(leaves[1].submission_timestamp, 2000);
         assert!(!leaves[1].is_precert);
         assert_eq!(leaves[1].cert_der, b"cert2");
         assert_eq!(leaves[1].chain_fingerprints.len(), 1);
 
-        assert_eq!(leaves[2].timestamp, 3000);
+        assert_eq!(leaves[2].submission_timestamp, 3000);
         assert!(leaves[2].is_precert);
         assert_eq!(leaves[2].cert_der, b"precert");
     }
