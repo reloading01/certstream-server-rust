@@ -23,9 +23,9 @@ pub struct CertificateData {
     pub cert_index: u64,
     pub cert_link: String,
     pub seen: f64,
-    /// CT log timestamp extracted from the leaf_input MerkleTreeLeaf structure
-    /// (RFC 6962, bytes 2–9), in seconds since Unix epoch with millisecond precision.
-    pub timestamp: f64,
+    /// Submission timestamp: the moment the CT log issued the SCT for this entry
+    /// (RFC 6962 §3.1), in seconds since Unix epoch with millisecond precision.
+    pub submission_timestamp: f64,
     pub source: Arc<Source>,
 }
 
@@ -223,7 +223,7 @@ struct LiteData<'a> {
     cert_index: u64,
     cert_link: &'a str,
     seen: f64,
-    timestamp: f64,
+    submission_timestamp: f64,
     source: &'a Arc<Source>,
 }
 
@@ -273,7 +273,7 @@ impl CertificateMessage {
                 cert_index: self.data.cert_index,
                 cert_link: &self.data.cert_link,
                 seen: self.data.seen,
-                timestamp: self.data.timestamp,
+                submission_timestamp: self.data.submission_timestamp,
                 source: &self.data.source,
             },
         }
@@ -323,7 +323,7 @@ mod tests {
                 cert_index: 12345,
                 cert_link: "https://ct.example.com/entry/12345".into(),
                 seen: 1700000000.0,
-                timestamp: 1700000000.0,
+                submission_timestamp: 1700000000.0,
                 source: Arc::new(Source {
                     name: Arc::from("Test Log"),
                     url: Arc::from("https://ct.example.com/"),

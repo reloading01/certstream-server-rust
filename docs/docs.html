@@ -130,6 +130,13 @@
                     <h2>Message Format</h2>
                     <p>JSON structure for certificate update messages</p>
                 </div>
+                <p style="margin-bottom: 1rem; color: var(--text-muted);">
+                    Two timestamps appear in each message: <code>seen</code> is the wall-clock time this server
+                    processed the entry, while <code>submission_timestamp</code> is the moment the CT log itself
+                    accepted the certificate and issued a Signed Certificate Timestamp (SCT) — as defined by
+                    <a href="https://www.rfc-editor.org/rfc/rfc6962#section-3.1" target="_blank" rel="noopener">RFC 6962 §3.1</a>.
+                    Both are Unix timestamps (seconds since epoch, with millisecond precision).
+                </p>
                 <div class="code-example" style="max-width: 900px;">
                     <div class="code-example-header">
                         <span class="lang">JSON</span>
@@ -174,6 +181,7 @@
     "<span class="str">chain</span>": [...],  <span class="cm">// full-stream only</span>
     "<span class="str">cert_index</span>": <span class="var">1234567890</span>,
     "<span class="str">seen</span>": <span class="var">1703808000.123</span>,
+    "<span class="str">submission_timestamp</span>": <span class="var">1703721600.456</span>,  <span class="cm">// when the CT log accepted this cert (RFC 6962 §3.1)</span>
     "<span class="str">source</span>": {
       "<span class="str">url</span>": "<span class="str">ct.googleapis.com/logs/argon2025</span>",
       "<span class="str">name</span>": "<span class="str">Google Argon 2025</span>"
