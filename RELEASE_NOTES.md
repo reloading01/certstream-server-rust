@@ -1,5 +1,52 @@
 # Release Notes
 
+## v1.3.4 — Submission Timestamp Support
+
+**April 3, 2026**
+
+Adds the `submission_timestamp` field to all certificate messages — the moment the CT log issued the Signed Certificate Timestamp (SCT) per [RFC 6962 §3.1](https://www.rfc-editor.org/rfc/rfc6962#section-3.1). This complements the existing `seen` field (server-side processing time) and enables consumers to gauge certificate freshness and estimate maximum merge delay.
+
+### New Features
+
+**`submission_timestamp` Field**
+Every certificate message (full, lite) now includes `submission_timestamp`: a Unix timestamp (seconds since epoch, millisecond precision) extracted from the `TimestampedEntry.timestamp` field in the CT log's Merkle tree leaf. Available on both RFC 6962 and static CT log entries.
+
+```json
+{
+  "seen": 1703808000.123,
+  "submission_timestamp": 1703721600.456
+}
+```
+
+| Field | Source | Meaning |
+|-------|--------|---------|
+| `seen` | Server clock | When this server processed the entry |
+| `submission_timestamp` | CT log | When the CT log accepted the certificate and issued the SCT |
+
+### Implementation
+
+- **RFC 6962 path**: Extracted from bytes 2–9 of `leaf_input` (uint64 big-endian milliseconds)
+- **Static CT path**: Extracted from `TileLeaf` timestamp field, renamed from `timestamp` to `submission_timestamp` for clarity
+
+### Test Coverage
+
+189 unit tests (no change in count — existing static CT tests updated for field rename).
+
+### Upgrade Notes
+
+- Drop-in upgrade from v1.3.3. No config or state file changes.
+- Additive change — existing WebSocket/SSE consumers will see a new `submission_timestamp` field in JSON payloads; no fields removed.
+
+```bash
+docker pull ghcr.io/reloading01/certstream-server-rust:1.3.4
+```
+
+### Community
+
+Thanks to [@raffysommy](https://github.com/raffysommy) for the contribution ([#5](https://github.com/reloading01/certstream-server-rust/pull/5)).
+
+---
+
 ## v1.3.3 — Bandwidth Optimization & Stream Control
 
 **March 13, 2026**
