@@ -472,6 +472,7 @@ pub async fn run_watcher_with_cache(log: CtLog, ctx: WatcherContext) {
                                     cert_index,
                                     cert_link,
                                     seen,
+                                    submission_timestamp: parsed.submission_timestamp,
                                     source: Arc::clone(&source),
                                 },
                             };
