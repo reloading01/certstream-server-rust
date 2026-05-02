@@ -28,7 +28,6 @@ use api::{ApiState, CertificateCache, LogTracker, ServerStats};
 use cli::{CliArgs, VERSION};
 use config::Config;
 use ct::{fetch_log_list, WatcherContext};
-
 use dedup::DedupFilter;
 use health::{deep_health, example_json, health, HealthState};
 use hot_reload::{HotReloadManager, HotReloadableConfig};
@@ -141,9 +140,16 @@ async fn main() {
         None
     };
 
-    let dedup_filter = Arc::new(DedupFilter::new());
+    let dedup_filter = Arc::new(DedupFilter::with_config(
+        config.dedup.capacity,
+        Duration::from_secs(config.dedup.ttl_secs),
+    ));
     dedup_filter.clone().start_cleanup_task(shutdown_token.clone());
-    info!("cross-log dedup filter enabled");
+    info!(
+        capacity = config.dedup.capacity,
+        ttl_secs = config.dedup.ttl_secs,
+        "cross-log dedup filter enabled"
+    );
 
     let ct_log_config = Arc::new(config.ct_log.clone());
     let log_tracker = Arc::new(LogTracker::new());

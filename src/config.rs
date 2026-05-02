@@ -247,6 +247,30 @@ fn default_burst_window_seconds() -> u64 {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+pub struct DedupConfig {
+    #[serde(default = "default_dedup_capacity")]
+    pub capacity: usize,
+    #[serde(default = "default_dedup_ttl_secs")]
+    pub ttl_secs: u64,
+}
+
+impl Default for DedupConfig {
+    fn default() -> Self {
+        Self {
+            capacity: default_dedup_capacity(),
+            ttl_secs: default_dedup_ttl_secs(),
+        }
+    }
+}
+
+fn default_dedup_capacity() -> usize {
+    1_000_000
+}
+fn default_dedup_ttl_secs() -> u64 {
+    900
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct ApiConfig {
     #[serde(default = "default_cache_capacity")]
     pub cache_capacity: usize,
@@ -350,6 +374,7 @@ pub struct Config {
     pub auth: AuthConfig,
     pub hot_reload: HotReloadConfig,
     pub streams: StreamConfig,
+    pub dedup: DedupConfig,
     pub config_path: Option<String>,
 }
 
@@ -384,6 +409,8 @@ struct YamlConfig {
     hot_reload: Option<HotReloadConfig>,
     #[serde(default)]
     streams: Option<StreamConfig>,
+    #[serde(default)]
+    dedup: Option<DedupConfig>,
 }
 
 struct YamlConfigWithPath {
@@ -550,6 +577,14 @@ impl Config {
             hot_reload.watch_path = Some(v);
         }
 
+        let mut dedup = yaml_config.dedup.unwrap_or_default();
+        if let Ok(v) = env::var("CERTSTREAM_DEDUP_CAPACITY") {
+            dedup.capacity = v.parse().unwrap_or(dedup.capacity);
+        }
+        if let Ok(v) = env::var("CERTSTREAM_DEDUP_TTL_SECS") {
+            dedup.ttl_secs = v.parse().unwrap_or(dedup.ttl_secs);
+        }
+
         let mut streams = yaml_config.streams.unwrap_or_default();
         if let Ok(v) = env::var("CERTSTREAM_STREAM_FULL_ENABLED") {
             streams.full = v.parse().unwrap_or(streams.full);
@@ -580,6 +615,7 @@ impl Config {
             auth,
             hot_reload,
             streams,
+            dedup,
             config_path,
         }
     }
@@ -709,6 +745,7 @@ mod tests {
             auth: AuthConfig::default(),
             hot_reload: HotReloadConfig::default(),
             streams: StreamConfig::default(),
+            dedup: DedupConfig::default(),
             config_path: None,
         }
     }

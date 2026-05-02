@@ -1,5 +1,69 @@
 # Release Notes
 
+## v1.4.0 — static-ct-api v1.0.0-rc.1 + log-list discovery
+
+**May 2, 2026**
+
+Brings the project in line with the post-RFC6962 CT ecosystem: Apple-list discovery for tiled logs, static-ct-api v1.0.0-rc.1 conformance (leaf_index extension, partial-tile width validation, tree-size monotonicity), runtime kill switches per protocol family, and a critical tile-parser bug fix that had silently dropped 99% of static-CT entries since v1.2.
+
+### Highlights
+
+**Tile parser correctness (critical fix).** The `Fingerprint certificate_chain<0..2^16-1>` field is byte-length-prefixed per the static-ct-api framing, not count-prefixed. Pre-1.4 builds treated the prefix as a fingerprint count, consuming subsequent leaves' bytes as chain data — every tile yielded only its first leaf. With the fix, full tiles correctly emit all 256 entries (verified against real Sycamore/Willow/Cloudflare Raio/IPng Networks tiles).
+
+**Log-list discovery.** `additional_log_lists` (default: Apple's `current_log_list.json`) is fetched in parallel with Google's v3 list. Both lists' `operators[].tiled_logs[]` arrays are now read and surfaced as static-ct watchers. Logs appearing in multiple lists are deduped by `log_id`. Submission URL drives the checkpoint origin per spec; user-provided `static_logs` entries override discovery for the same URL.
+
+**static-ct-api v1.0.0-rc.1 conformance:**
+- `leaf_index` SCT extension (type 0, 40-bit BE) parsed from `CtExtensions`; validated against the tile-derived index, mismatches counted via `certstream_static_ct_leaf_index_mismatch`.
+- Partial-tile width enforced: a tile body must contain exactly `floor(s / 256^l) mod 256` leaves for the last tile, 256 for full. Mismatches drop the tile and back off rather than emit partial data (`certstream_static_ct_tile_width_mismatch`).
+- Tree-size monotonicity: rollbacks are detected, logged, and refused (`certstream_static_ct_tree_size_rollbacks`).
+- Witness signatures on checkpoints are passively accepted — extra `— ` lines beyond the primary log signature no longer trip the parser.
+
+**Runtime kill switches:**
+- `CERTSTREAM_RFC6962_ENABLED=false` (or YAML `ct_log.rfc6962_enabled: false`) skips the legacy watcher pool entirely. Prepares for the 2027 RFC6962 sunset.
+- `CERTSTREAM_STATIC_CT_ENABLED=false` mirrors for static-ct.
+- Refuses to start when both are disabled rather than running with zero sources.
+
+**Type-aware health probes.** Static-CT logs are reachability-probed against `/checkpoint`; RFC6962 logs against `/ct/v1/get-sth`. Static-CT logs no longer get false-negative-filtered out of the candidate pool.
+
+**Per-operator rate limiting for static-CT.** Watchers belonging to the same operator (e.g. all of Cloudflare's Raio shards) now share a 2 req/s limiter, matching the existing RFC6962 behavior. Avoids thundering-herd toward a single CDN host.
+
+**Tunable cross-log dedup.** New `dedup.capacity` / `dedup.ttl_secs` config (env: `CERTSTREAM_DEDUP_CAPACITY` / `CERTSTREAM_DEDUP_TTL_SECS`). Defaults bumped to 1M / 900s to cover the wider RFC6962↔static-CT propagation window.
+
+### New metrics
+
+- `certstream_static_ct_leaf_index_mismatch{log}`
+- `certstream_static_ct_tile_width_mismatch{log}`
+- `certstream_static_ct_tree_size_rollbacks{log}`
+
+### Breaking-ish changes
+
+- `fetch_log_list` (internal) now takes `&[String]` of additional list URLs and returns mixed RFC6962+static-CT logs; downstream binary integrators should re-pin.
+- `dedup` config block is new (defaults backward-compatible).
+- `additional_log_lists` defaults to fetching Apple's list at startup. Set to an empty array (or `CERTSTREAM_ADDITIONAL_LOG_LISTS=`) to opt out.
+
+### Test coverage
+
+205 unit tests (was 190 in v1.3.4). New: leaf_index extension parsing, byte-length-prefixed chain fingerprints, Apple-style log-list schema, partial-tile semantics.
+
+### Upgrade notes
+
+```bash
+docker pull ghcr.io/reloading01/certstream-server-rust:1.4.0
+```
+
+Drop-in upgrade from v1.3.4. Existing config files keep working; `additional_log_lists` and `dedup` blocks are optional. To stay on the v1.3 behavior:
+
+```yaml
+additional_log_lists: []
+ct_log:
+  static_ct_enabled: false
+dedup:
+  capacity: 500000
+  ttl_secs: 300
+```
+
+---
+
 ## v1.3.4 — Submission Timestamp Support
 
 **April 3, 2026**

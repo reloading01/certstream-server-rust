@@ -4,8 +4,16 @@ use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
 
-const DEFAULT_CAPACITY: usize = 500_000;
-const DEFAULT_TTL_SECS: u64 = 300;
+/// Default capacity bumped from 500K (v1.3.x) to 1M because static-ct logs
+/// (Sycamore, Willow, Cloudflare Raio, Geomys Tuscolo, …) issue tiles in tight
+/// 60-second MMD windows, and during the RFC6962/static-CT transition the same
+/// certificate often appears in 3-4 logs within minutes. Holding a wider window
+/// keeps the duplicate filter effective without forcing premature eviction.
+const DEFAULT_CAPACITY: usize = 1_000_000;
+/// 15 minutes — comfortably covers the typical multi-log SCT propagation window
+/// (a few minutes) plus headroom for slower static-ct shards. Configurable via
+/// `dedup.ttl_secs` in YAML or `CERTSTREAM_DEDUP_TTL_SECS`.
+const DEFAULT_TTL_SECS: u64 = 900;
 const DEFAULT_CLEANUP_INTERVAL_SECS: u64 = 60;
 
 /// Issue #1: Use raw [u8; 32] SHA-256 bytes as the key — fixed-size, stack-allocated,
@@ -18,10 +26,14 @@ pub struct DedupFilter {
 
 impl DedupFilter {
     pub fn new() -> Self {
+        Self::with_config(DEFAULT_CAPACITY, Duration::from_secs(DEFAULT_TTL_SECS))
+    }
+
+    pub fn with_config(capacity: usize, ttl: Duration) -> Self {
         Self {
-            seen: DashMap::with_capacity(DEFAULT_CAPACITY / 4),
-            capacity: DEFAULT_CAPACITY,
-            ttl: Duration::from_secs(DEFAULT_TTL_SECS),
+            seen: DashMap::with_capacity(capacity.max(4) / 4),
+            capacity: capacity.max(1),
+            ttl,
         }
     }
 

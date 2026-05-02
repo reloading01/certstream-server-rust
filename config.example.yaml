@@ -2,7 +2,17 @@ host: "0.0.0.0"
 port: 8080
 log_level: "info"
 buffer_size: 1000
+
+# Primary CT log list (Google v3 schema). Carries both legacy `logs[]` and
+# static-ct-api `tiled_logs[]` entries.
 ct_logs_url: "https://www.gstatic.com/ct/log_list/v3/log_list.json"
+
+# Additional log-list URLs fetched in parallel and merged with the primary list.
+# Logs that appear in multiple lists are deduped by `log_id`. Apple's list is
+# the canonical second source for static-ct-api operators in 2026; remove the
+# entry (or pass an empty `CERTSTREAM_ADDITIONAL_LOG_LISTS=`) to opt out.
+additional_log_lists:
+  - "https://valid.apple.com/ct/log_list/current_log_list.json"
 
 protocols:
   websocket: true
@@ -31,6 +41,16 @@ ct_log:
   state_file: "certstream_state.json"
   batch_size: 256
   poll_interval_ms: 1000
+  # Master switches per protocol family. Set `rfc6962_enabled: false` once
+  # you've fully cut over to static-ct logs (env: CERTSTREAM_RFC6962_ENABLED).
+  rfc6962_enabled: true
+  static_ct_enabled: true
+
+# Cross-log certificate dedup. Defaults sized for the 2026 RFC6962/static-ct
+# transition where the same cert appears in 3-4 logs in tight 60s MMD windows.
+dedup:
+  capacity: 1000000   # max in-flight fingerprints
+  ttl_secs: 900       # 15-minute window — keep above max log MMD
 
 connection_limit:
   enabled: false
@@ -51,15 +71,16 @@ hot_reload:
 
 custom_logs: []
 
-# Static CT logs (Sunlight / static-ct-api protocol)
-# These logs use checkpoint + tile-based fetching instead of get-sth/get-entries
-# Use monitoring prefix (mon.*) for read access to checkpoint and tile data
+# Static CT logs (Sunlight / static-ct-api protocol). These are merged with logs
+# discovered via `ct_logs_url` and `additional_log_lists` (deduped by URL — a
+# config entry overrides discovery, e.g. when you need a custom `log_origin`).
+#
+# `url` is the monitoring prefix (often `mon.*`) used to fetch checkpoint and
+# tile data. `log_origin` overrides the expected checkpoint origin when the
+# fetch URL host differs from the submission URL host (e.g. mon.* vs log.*).
+# When omitted, the origin is derived from the URL by stripping scheme and
+# trailing slash.
 static_logs:
-  - name: "Let's Encrypt 'Willow' 2026h1"
-    url: "https://mon.willow.ct.letsencrypt.org/2026h1/"
   - name: "Let's Encrypt 'Sycamore' 2026h1"
     url: "https://mon.sycamore.ct.letsencrypt.org/2026h1/"
-  - name: "Let's Encrypt 'Willow' 2025h2d"
-    url: "https://mon.willow.ct.letsencrypt.org/2025h2d/"
-  - name: "Let's Encrypt 'Sycamore' 2025h2d"
-    url: "https://mon.sycamore.ct.letsencrypt.org/2025h2d/"
+    log_origin: "log.sycamore.ct.letsencrypt.org/2026h1"
