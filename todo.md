@@ -1,5 +1,11 @@
 # certstream-server-rust — 2026 CT Adaptation TODO
 
+> **Status:** v1.4.0 (May 2, 2026) addresses P0 + P1 items below plus a critical
+> tile-parser bug fix discovered during integration testing. P2/P3 polish
+> remains for v1.4.1+. See `RELEASE_NOTES.md` for the full v1.4.0 entry.
+
+
+
 Mayıs 2026 itibarıyla CT ekosistemindeki değişikliklere uyum için yol haritası.
 Audit + static-ct-api v1.0.0-rc.1 spec + Apple/Chrome politika incelemesine dayanır.
 
