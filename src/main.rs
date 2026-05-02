@@ -201,8 +201,27 @@ async fn main() {
             streams: streams.clone(),
         };
 
-        spawn_rfc6962_watchers(&config, &log_tracker, &watcher_ctx).await;
-        spawn_static_ct_watchers(&config, &log_tracker, &watcher_ctx);
+        let rfc_count = if config.ct_log.rfc6962_enabled {
+            spawn_rfc6962_watchers(&config, &log_tracker, &watcher_ctx).await
+        } else {
+            info!("RFC 6962 watchers disabled by config (rfc6962_enabled=false)");
+            metrics::gauge!("certstream_ct_logs_count").set(0.0);
+            0
+        };
+
+        let static_count = if config.ct_log.static_ct_enabled {
+            spawn_static_ct_watchers(&config, &log_tracker, &watcher_ctx)
+        } else {
+            info!("static-CT watchers disabled by config (static_ct_enabled=false)");
+            metrics::gauge!("certstream_static_ct_logs_count").set(0.0);
+            0
+        };
+
+        if rfc_count == 0 && static_count == 0 {
+            error!("no CT log watchers were started — refusing to run with zero sources");
+            std::process::exit(1);
+        }
+        info!(rfc6962 = rfc_count, static_ct = static_count, "CT watcher pool started");
     } else {
         info!("dry-run mode: skipping CT log connections");
     }
@@ -291,14 +310,16 @@ async fn spawn_rfc6962_watchers(
     config: &Config,
     log_tracker: &Arc<LogTracker>,
     ctx: &WatcherContext,
-) {
+) -> usize {
     use std::collections::HashMap;
     use ct::OperatorRateLimiter;
 
+    let spawned;
     match fetch_log_list(&ctx.client, &config.ct_logs_url, config.custom_logs.clone()).await {
         Ok(logs) => {
             info!(count = logs.len(), "found CT logs");
             metrics::gauge!("certstream_ct_logs_count").set(logs.len() as f64);
+            spawned = logs.len();
 
             // Build per-operator rate limiters (500ms = 2 req/s shared across all logs of same operator)
             let mut operator_limiters: HashMap<String, OperatorRateLimiter> = HashMap::new();
@@ -355,18 +376,19 @@ async fn spawn_rfc6962_watchers(
         }
         Err(e) => {
             error!(error = %e, "failed to fetch CT log list");
-            std::process::exit(1);
+            return 0;
         }
     }
+    spawned
 }
 
 fn spawn_static_ct_watchers(
     config: &Config,
     log_tracker: &Arc<LogTracker>,
     ctx: &WatcherContext,
-) {
+) -> usize {
     if config.static_logs.is_empty() {
-        return;
+        return 0;
     }
 
     metrics::gauge!("certstream_static_ct_logs_count").set(config.static_logs.len() as f64);
@@ -412,6 +434,7 @@ fn spawn_static_ct_watchers(
     }
 
     info!(count = config.static_logs.len(), "static CT log watchers started");
+    config.static_logs.len()
 }
 
 /// Dependencies needed to build the HTTP router.

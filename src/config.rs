@@ -72,6 +72,17 @@ pub struct CtLogConfig {
     pub batch_size: u64,
     #[serde(default = "default_poll_interval_ms")]
     pub poll_interval_ms: u64,
+    /// Master switch for the legacy RFC 6962 watcher pool. When `false`, the
+    /// Google v3 log list (and any `custom_logs`) are skipped at startup.
+    /// Override with `CERTSTREAM_RFC6962_ENABLED`.
+    #[serde(default = "default_true")]
+    pub rfc6962_enabled: bool,
+    /// Master switch for the static-CT (Sunlight / static-ct-api) watchers.
+    /// When `false`, both `static_logs` and any tiled logs discovered via the
+    /// log list are skipped at startup.
+    /// Override with `CERTSTREAM_STATIC_CT_ENABLED`.
+    #[serde(default = "default_true")]
+    pub static_ct_enabled: bool,
 }
 
 impl Default for CtLogConfig {
@@ -87,6 +98,8 @@ impl Default for CtLogConfig {
             state_file: default_state_file(),
             batch_size: default_batch_size(),
             poll_interval_ms: default_poll_interval_ms(),
+            rfc6962_enabled: true,
+            static_ct_enabled: true,
         }
     }
 }
@@ -467,6 +480,12 @@ impl Config {
         if let Ok(v) = env::var("CERTSTREAM_CT_LOG_POLL_INTERVAL_MS") {
             ct_log.poll_interval_ms = v.parse().unwrap_or(ct_log.poll_interval_ms);
         }
+        if let Ok(v) = env::var("CERTSTREAM_RFC6962_ENABLED") {
+            ct_log.rfc6962_enabled = v.parse().unwrap_or(ct_log.rfc6962_enabled);
+        }
+        if let Ok(v) = env::var("CERTSTREAM_STATIC_CT_ENABLED") {
+            ct_log.static_ct_enabled = v.parse().unwrap_or(ct_log.static_ct_enabled);
+        }
 
         let mut connection_limit = yaml_config.connection_limit.unwrap_or_default();
         if let Ok(v) = env::var("CERTSTREAM_CONNECTION_LIMIT_ENABLED") {
@@ -685,6 +704,19 @@ mod tests {
         assert_eq!(config.state_file, Some("certstream_state.json".to_string()));
         assert_eq!(config.batch_size, 256);
         assert_eq!(config.poll_interval_ms, 1000);
+        assert!(config.rfc6962_enabled);
+        assert!(config.static_ct_enabled);
+    }
+
+    #[test]
+    fn test_ct_log_config_disable_flags() {
+        let yaml = r#"
+rfc6962_enabled: false
+static_ct_enabled: false
+"#;
+        let config: CtLogConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(!config.rfc6962_enabled);
+        assert!(!config.static_ct_enabled);
     }
 
     #[test]

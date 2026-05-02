@@ -130,6 +130,37 @@ fn make_test_log(description: &str, url: &str, state: Option<LogState>) -> CtLog
     }
 }
 
+/// Probe a log for reachability. Dispatches by `LogType`:
+/// - `Rfc6962` logs respond on `/ct/v1/get-sth`.
+/// - `StaticCt` logs respond on `/checkpoint`.
+///
+/// Static-CT logs do not implement `get-sth`, so attempting it produces false
+/// negatives. When the spec evolves and a log temporarily exposes both, either
+/// endpoint is sufficient — we treat any `200` on the type-appropriate URL as
+/// reachable.
+async fn probe_log(client: &Client, log: &CtLog) -> bool {
+    let url = match log.log_type {
+        LogType::Rfc6962 => format!("{}/ct/v1/get-sth", log.normalized_url()),
+        LogType::StaticCt => format!("{}/checkpoint", log.normalized_url()),
+    };
+    match client
+        .get(&url)
+        .timeout(Duration::from_secs(5))
+        .send()
+        .await
+    {
+        Ok(resp) if resp.status().is_success() => true,
+        Ok(resp) => {
+            debug!(log = %log.description, status = %resp.status(), kind = ?log.log_type, "log not reachable");
+            false
+        }
+        Err(_) => {
+            debug!(log = %log.description, kind = ?log.log_type, "log not reachable");
+            false
+        }
+    }
+}
+
 pub async fn fetch_log_list(
     client: &Client,
     url: &str,
@@ -161,22 +192,10 @@ pub async fn fetch_log_list(
         .map(|log| {
             let client = client.clone();
             async move {
-                let sth_url = format!("{}/ct/v1/get-sth", log.normalized_url());
-                match client
-                    .get(&sth_url)
-                    .timeout(Duration::from_secs(5))
-                    .send()
-                    .await
-                {
-                    Ok(resp) if resp.status().is_success() => Some(log),
-                    Ok(resp) => {
-                        debug!(log = %log.description, status = %resp.status(), "log not reachable");
-                        None
-                    }
-                    Err(_) => {
-                        debug!(log = %log.description, "log not reachable");
-                        None
-                    }
+                if probe_log(&client, &log).await {
+                    Some(log)
+                } else {
+                    None
                 }
             }
         })
