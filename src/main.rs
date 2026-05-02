@@ -28,6 +28,7 @@ use api::{ApiState, CertificateCache, LogTracker, ServerStats};
 use cli::{CliArgs, VERSION};
 use config::Config;
 use ct::{fetch_log_list, WatcherContext};
+
 use dedup::DedupFilter;
 use health::{deep_health, example_json, health, HealthState};
 use hot_reload::{HotReloadManager, HotReloadableConfig};
@@ -201,21 +202,8 @@ async fn main() {
             streams: streams.clone(),
         };
 
-        let rfc_count = if config.ct_log.rfc6962_enabled {
-            spawn_rfc6962_watchers(&config, &log_tracker, &watcher_ctx).await
-        } else {
-            info!("RFC 6962 watchers disabled by config (rfc6962_enabled=false)");
-            metrics::gauge!("certstream_ct_logs_count").set(0.0);
-            0
-        };
-
-        let static_count = if config.ct_log.static_ct_enabled {
-            spawn_static_ct_watchers(&config, &log_tracker, &watcher_ctx)
-        } else {
-            info!("static-CT watchers disabled by config (static_ct_enabled=false)");
-            metrics::gauge!("certstream_static_ct_logs_count").set(0.0);
-            0
-        };
+        let (rfc_count, static_count) =
+            discover_and_spawn(&config, &log_tracker, &watcher_ctx).await;
 
         if rfc_count == 0 && static_count == 0 {
             error!("no CT log watchers were started — refusing to run with zero sources");
@@ -306,135 +294,179 @@ fn spawn_signal_handler(shutdown_token: CancellationToken) {
     });
 }
 
-async fn spawn_rfc6962_watchers(
+/// Build a fresh `OperatorRateLimiter` capped at 2 req/s, shared across all
+/// logs of the same operator so a single CDN host doesn't see a thundering
+/// herd from per-shard watchers.
+fn make_operator_limiter() -> ct::OperatorRateLimiter {
+    let interval = tokio::time::interval(Duration::from_millis(500));
+    Arc::new(tokio::sync::Mutex::new(interval))
+}
+
+/// Discovery + spawn pipeline. Returns `(rfc6962_count, static_ct_count)`.
+async fn discover_and_spawn(
     config: &Config,
     log_tracker: &Arc<LogTracker>,
     ctx: &WatcherContext,
-) -> usize {
+) -> (usize, usize) {
     use std::collections::HashMap;
-    use ct::OperatorRateLimiter;
+    use ct::{LogType, OperatorRateLimiter};
 
-    let spawned;
-    match fetch_log_list(&ctx.client, &config.ct_logs_url, config.custom_logs.clone()).await {
-        Ok(logs) => {
-            info!(count = logs.len(), "found CT logs");
-            metrics::gauge!("certstream_ct_logs_count").set(logs.len() as f64);
-            spawned = logs.len();
+    let discovered = fetch_log_list(
+        &ctx.client,
+        &config.ct_logs_url,
+        &config.additional_log_lists,
+        config.custom_logs.clone(),
+    )
+    .await;
 
-            // Build per-operator rate limiters (500ms = 2 req/s shared across all logs of same operator)
-            let mut operator_limiters: HashMap<String, OperatorRateLimiter> = HashMap::new();
-            for log in &logs {
-                let op = log.operator.to_lowercase();
-                operator_limiters.entry(op).or_insert_with(|| {
-                    let interval = tokio::time::interval(Duration::from_millis(500));
-                    Arc::new(tokio::sync::Mutex::new(interval))
-                });
-            }
+    let mut all_logs = match discovered {
+        Ok(v) => v,
+        Err(e) => {
+            error!(error = %e, "failed to fetch any CT log list");
+            Vec::new()
+        }
+    };
 
-            for log in &logs {
-                log_tracker.register(
-                    log.description.clone(),
-                    log.normalized_url(),
-                    log.operator.clone(),
-                );
-            }
+    // Splice in the user's static_logs from config. We dedupe by URL so a
+    // user-provided override (e.g. with a custom log_origin) takes precedence
+    // over discovery for the same monitoring URL.
+    let mut config_static_urls = std::collections::HashSet::new();
+    for sl in &config.static_logs {
+        let normalized = sl.url.trim_end_matches('/').to_string();
+        config_static_urls.insert(normalized);
+    }
+    all_logs.retain(|l| {
+        if l.log_type == LogType::StaticCt {
+            !config_static_urls.contains(l.url.trim_end_matches('/'))
+        } else {
+            true
+        }
+    });
+    for sl in &config.static_logs {
+        all_logs.push(ct::CtLog::from(sl.clone()));
+    }
 
-            for (index, log) in logs.into_iter().enumerate() {
-                let mut ctx = ctx.clone();
-                let op = log.operator.to_lowercase();
-                ctx.rate_limiter = operator_limiters.get(&op).cloned();
-                let cancel = ctx.shutdown.clone();
+    // Partition by type — the two watcher pools differ in protocol.
+    let (rfc_logs, static_logs): (Vec<_>, Vec<_>) =
+        all_logs.into_iter().partition(|l| l.log_type == LogType::Rfc6962);
 
-                tokio::spawn(async move {
-                    tokio::time::sleep(Duration::from_millis(50 * index as u64)).await;
+    let mut operator_limiters: HashMap<String, OperatorRateLimiter> = HashMap::new();
 
-                    let log_name = log.description.clone();
-                    loop {
-                        let result = std::panic::AssertUnwindSafe(
-                            ct::watcher::run_watcher_with_cache(log.clone(), ctx.clone()),
-                        );
+    let rfc_count = if config.ct_log.rfc6962_enabled {
+        info!(count = rfc_logs.len(), "found CT logs (RFC 6962)");
+        metrics::gauge!("certstream_ct_logs_count").set(rfc_logs.len() as f64);
 
-                        tokio::select! {
-                            _ = cancel.cancelled() => {
-                                info!(log = %log_name, "worker stopped by shutdown signal");
-                                break;
-                            }
-                            res = futures::FutureExt::catch_unwind(result) => {
-                                match res {
-                                    Ok(_) => break,
-                                    Err(_) => {
-                                        error!(log = %log_name, "worker panicked, restarting in 5s");
-                                        metrics::counter!("certstream_worker_panics").increment(1);
-                                        tokio::time::sleep(Duration::from_secs(5)).await;
-                                    }
+        for log in &rfc_logs {
+            operator_limiters
+                .entry(log.operator.to_lowercase())
+                .or_insert_with(make_operator_limiter);
+        }
+
+        for log in &rfc_logs {
+            log_tracker.register(
+                log.description.clone(),
+                log.normalized_url(),
+                log.operator.clone(),
+            );
+        }
+
+        for (index, log) in rfc_logs.iter().cloned().enumerate() {
+            let mut ctx = ctx.clone();
+            ctx.rate_limiter = operator_limiters.get(&log.operator.to_lowercase()).cloned();
+            let cancel = ctx.shutdown.clone();
+
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(50 * index as u64)).await;
+                let log_name = log.description.clone();
+                loop {
+                    let result = std::panic::AssertUnwindSafe(
+                        ct::watcher::run_watcher_with_cache(log.clone(), ctx.clone()),
+                    );
+
+                    tokio::select! {
+                        _ = cancel.cancelled() => {
+                            info!(log = %log_name, "worker stopped by shutdown signal");
+                            break;
+                        }
+                        res = futures::FutureExt::catch_unwind(result) => {
+                            match res {
+                                Ok(_) => break,
+                                Err(_) => {
+                                    error!(log = %log_name, "worker panicked, restarting in 5s");
+                                    metrics::counter!("certstream_worker_panics").increment(1);
+                                    tokio::time::sleep(Duration::from_secs(5)).await;
                                 }
                             }
                         }
                     }
-                });
-            }
+                }
+            });
         }
-        Err(e) => {
-            error!(error = %e, "failed to fetch CT log list");
-            return 0;
+        rfc_logs.len()
+    } else {
+        info!("RFC 6962 watchers disabled by config (rfc6962_enabled=false)");
+        metrics::gauge!("certstream_ct_logs_count").set(0.0);
+        0
+    };
+
+    let static_count = if config.ct_log.static_ct_enabled {
+        info!(count = static_logs.len(), "found CT logs (static-ct-api)");
+        metrics::gauge!("certstream_static_ct_logs_count").set(static_logs.len() as f64);
+
+        for log in &static_logs {
+            operator_limiters
+                .entry(log.operator.to_lowercase())
+                .or_insert_with(make_operator_limiter);
         }
-    }
-    spawned
-}
 
-fn spawn_static_ct_watchers(
-    config: &Config,
-    log_tracker: &Arc<LogTracker>,
-    ctx: &WatcherContext,
-) -> usize {
-    if config.static_logs.is_empty() {
-        return 0;
-    }
+        for log in &static_logs {
+            log_tracker.register(
+                log.description.clone(),
+                log.normalized_url(),
+                log.operator.clone(),
+            );
+        }
 
-    metrics::gauge!("certstream_static_ct_logs_count").set(config.static_logs.len() as f64);
+        for (index, log) in static_logs.iter().cloned().enumerate() {
+            let mut ctx = ctx.clone();
+            ctx.rate_limiter = operator_limiters.get(&log.operator.to_lowercase()).cloned();
+            let cancel = ctx.shutdown.clone();
 
-    for (index, static_log) in config.static_logs.iter().enumerate() {
-        let ct_log = ct::CtLog::from(static_log.clone());
-        log_tracker.register(
-            ct_log.description.clone(),
-            ct_log.normalized_url(),
-            ct_log.operator.clone(),
-        );
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(100 * index as u64)).await;
+                let log_name = log.description.clone();
+                loop {
+                    let result = std::panic::AssertUnwindSafe(
+                        ct::static_ct::run_static_ct_watcher(log.clone(), ctx.clone()),
+                    );
 
-        let ctx = ctx.clone();
-        let cancel = ctx.shutdown.clone();
-
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(100 * index as u64)).await;
-
-            let log_name = ct_log.description.clone();
-            loop {
-                let result = std::panic::AssertUnwindSafe(
-                    ct::static_ct::run_static_ct_watcher(ct_log.clone(), ctx.clone()),
-                );
-
-                tokio::select! {
-                    _ = cancel.cancelled() => {
-                        info!(log = %log_name, "static CT worker stopped by shutdown signal");
-                        break;
-                    }
-                    res = futures::FutureExt::catch_unwind(result) => {
-                        match res {
-                            Ok(_) => break,
-                            Err(_) => {
-                                error!(log = %log_name, "static CT worker panicked, restarting in 5s");
-                                metrics::counter!("certstream_worker_panics").increment(1);
-                                tokio::time::sleep(Duration::from_secs(5)).await;
+                    tokio::select! {
+                        _ = cancel.cancelled() => {
+                            info!(log = %log_name, "static CT worker stopped by shutdown signal");
+                            break;
+                        }
+                        res = futures::FutureExt::catch_unwind(result) => {
+                            match res {
+                                Ok(_) => break,
+                                Err(_) => {
+                                    error!(log = %log_name, "static CT worker panicked, restarting in 5s");
+                                    metrics::counter!("certstream_worker_panics").increment(1);
+                                    tokio::time::sleep(Duration::from_secs(5)).await;
+                                }
                             }
                         }
                     }
                 }
-            }
-        });
-    }
+            });
+        }
+        static_logs.len()
+    } else {
+        info!("static-CT watchers disabled by config (static_ct_enabled=false)");
+        metrics::gauge!("certstream_static_ct_logs_count").set(0.0);
+        0
+    };
 
-    info!(count = config.static_logs.len(), "static CT log watchers started");
-    config.static_logs.len()
+    (rfc_count, static_count)
 }
 
 /// Dependencies needed to build the HTTP router.

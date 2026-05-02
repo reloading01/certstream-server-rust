@@ -333,6 +333,11 @@ pub struct Config {
     pub log_level: String,
     pub buffer_size: usize,
     pub ct_logs_url: String,
+    /// Additional log-list URLs to fetch in parallel and merge with the primary
+    /// list. Apple's `current_log_list.json` is the canonical second source: it
+    /// surfaces `tiled_logs` for static-ct-api operators that may not yet appear
+    /// in Google's v3 list. Logs appearing in both lists are deduped by `log_id`.
+    pub additional_log_lists: Vec<String>,
     pub tls_cert: Option<String>,
     pub tls_key: Option<String>,
     pub custom_logs: Vec<CustomCtLog>,
@@ -355,6 +360,8 @@ struct YamlConfig {
     log_level: Option<String>,
     buffer_size: Option<usize>,
     ct_logs_url: Option<String>,
+    #[serde(default)]
+    additional_log_lists: Vec<String>,
     tls_cert: Option<String>,
     tls_key: Option<String>,
     #[serde(default)]
@@ -425,6 +432,25 @@ impl Config {
             .unwrap_or_else(|| {
                 "https://www.gstatic.com/ct/log_list/v3/log_list.json".to_string()
             });
+
+        // Comma-separated env override; falls back to YAML; otherwise defaults
+        // to Apple's canonical list. Pass an empty string in the env to opt
+        // out (e.g. CERTSTREAM_ADDITIONAL_LOG_LISTS=).
+        let additional_log_lists: Vec<String> = match env::var("CERTSTREAM_ADDITIONAL_LOG_LISTS") {
+            Ok(v) if v.trim().is_empty() => Vec::new(),
+            Ok(v) => v
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect(),
+            Err(_) => {
+                if !yaml_config.additional_log_lists.is_empty() {
+                    yaml_config.additional_log_lists
+                } else {
+                    vec!["https://valid.apple.com/ct/log_list/current_log_list.json".to_string()]
+                }
+            }
+        };
 
         let tls_cert = env::var("CERTSTREAM_TLS_CERT").ok().or(yaml_config.tls_cert);
         let tls_key = env::var("CERTSTREAM_TLS_KEY").ok().or(yaml_config.tls_key);
@@ -541,6 +567,7 @@ impl Config {
             log_level,
             buffer_size,
             ct_logs_url,
+            additional_log_lists,
             tls_cert,
             tls_key,
             custom_logs: yaml_config.custom_logs,
@@ -669,6 +696,7 @@ mod tests {
             log_level: "info".to_string(),
             buffer_size: 1000,
             ct_logs_url: "https://example.com".to_string(),
+            additional_log_lists: vec![],
             tls_cert: None,
             tls_key: None,
             custom_logs: vec![],

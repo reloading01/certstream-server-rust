@@ -2,9 +2,10 @@ use crate::config::{CustomCtLog, StaticCtLog};
 use futures::future::join_all;
 use reqwest::Client;
 use serde::Deserialize;
+use std::collections::HashSet;
 use std::time::Duration;
 use thiserror::Error;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 #[derive(Error, Debug)]
 pub enum LogListError {
@@ -22,13 +23,35 @@ struct LogListResponse {
 #[derive(Debug, Deserialize)]
 struct Operator {
     name: String,
+    #[serde(default)]
     logs: Vec<RawCtLog>,
+    /// Apple's log list (and Google's v3 starting in 2026) carry static-ct-api endpoints
+    /// here. Older Google lists omit the field, hence the default. Operators that only
+    /// run tiled logs may also have an empty `logs` array.
+    #[serde(default)]
+    tiled_logs: Vec<RawTiledLog>,
 }
 
 #[derive(Debug, Deserialize)]
 struct RawCtLog {
     description: String,
     url: String,
+    #[serde(default)]
+    log_id: Option<String>,
+    #[serde(default)]
+    state: Option<LogState>,
+}
+
+/// Schema for a static-ct-api / Sunlight log entry as it appears in Apple's
+/// `current_log_list.json` and Google's v3 list. The submission URL doubles as
+/// the checkpoint origin (schema-less, trailing-slash-stripped).
+#[derive(Debug, Deserialize)]
+struct RawTiledLog {
+    description: String,
+    monitoring_url: String,
+    submission_url: String,
+    #[serde(default)]
+    log_id: Option<String>,
     #[serde(default)]
     state: Option<LogState>,
 }
@@ -67,6 +90,9 @@ pub struct CtLog {
     pub log_type: LogType,
     /// Explicit checkpoint origin override (see `StaticCtLog::log_origin`).
     pub log_origin: Option<String>,
+    /// Base64-encoded log ID (SHA-256 of the log's public key). Used to dedupe
+    /// logs that appear in multiple log lists (e.g. Google + Apple).
+    pub log_id: Option<String>,
     state: Option<LogState>,
 }
 
@@ -100,6 +126,7 @@ impl From<CustomCtLog> for CtLog {
             operator: "Custom".to_string(),
             log_type: LogType::Rfc6962,
             log_origin: None,
+            log_id: None,
             state: None,
         }
     }
@@ -113,9 +140,20 @@ impl From<StaticCtLog> for CtLog {
             operator: "Static CT".to_string(),
             log_type: LogType::StaticCt,
             log_origin: static_log.log_origin,
+            log_id: None,
             state: None,
         }
     }
+}
+
+/// Strip scheme and trailing slash to produce the static-ct-api checkpoint origin
+/// (matches the spec's "submission prefix as schema-less URL with no trailing slashes").
+fn submission_url_to_origin(submission_url: &str) -> String {
+    submission_url
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .trim_end_matches('/')
+        .to_string()
 }
 
 #[cfg(test)]
@@ -126,6 +164,7 @@ fn make_test_log(description: &str, url: &str, state: Option<LogState>) -> CtLog
         operator: "TestOp".to_string(),
         log_type: LogType::Rfc6962,
         log_origin: None,
+        log_id: None,
         state,
     }
 }
@@ -161,30 +200,94 @@ async fn probe_log(client: &Client, log: &CtLog) -> bool {
     }
 }
 
-pub async fn fetch_log_list(
-    client: &Client,
-    url: &str,
-    custom_logs: Vec<CustomCtLog>,
-) -> Result<Vec<CtLog>, LogListError> {
+/// Fetch a log list URL and parse it into raw `CtLog` candidates (no health
+/// check applied — caller is responsible for probing). The resulting vector
+/// contains both RFC 6962 entries (from `operators[].logs`) and static-CT
+/// entries (from `operators[].tiled_logs`), each tagged with their operator.
+async fn fetch_one_list(client: &Client, url: &str) -> Result<Vec<CtLog>, LogListError> {
     let response: LogListResponse = client.get(url).send().await?.json().await?;
-
-    let candidate_logs: Vec<CtLog> = response
-        .operators
-        .into_iter()
-        .flat_map(|op| {
-            let operator_name = op.name;
-            op.logs.into_iter().map(move |log| CtLog {
-                description: log.description,
-                url: log.url,
+    let mut out = Vec::new();
+    for op in response.operators {
+        let operator_name = op.name;
+        for raw in op.logs {
+            out.push(CtLog {
+                description: raw.description,
+                url: raw.url,
                 operator: operator_name.clone(),
                 log_type: LogType::Rfc6962,
                 log_origin: None,
-                state: log.state,
-            })
-        })
-        .filter(|log| log.is_usable())
-        .collect();
+                log_id: raw.log_id,
+                state: raw.state,
+            });
+        }
+        for raw in op.tiled_logs {
+            let origin = submission_url_to_origin(&raw.submission_url);
+            out.push(CtLog {
+                description: raw.description,
+                url: raw.monitoring_url,
+                operator: operator_name.clone(),
+                log_type: LogType::StaticCt,
+                log_origin: Some(origin),
+                log_id: raw.log_id,
+                state: raw.state,
+            });
+        }
+    }
+    Ok(out)
+}
 
+/// Discover CT logs from one or more log-list URLs and append the user's custom
+/// and static logs. Logs appearing in multiple lists are deduped by `log_id`
+/// (first occurrence wins). All discovered logs are health-probed in parallel;
+/// custom and static logs are appended without probing on the assumption they
+/// were configured intentionally.
+pub async fn fetch_log_list(
+    client: &Client,
+    primary_url: &str,
+    additional_urls: &[String],
+    custom_logs: Vec<CustomCtLog>,
+) -> Result<Vec<CtLog>, LogListError> {
+    // Issue all list fetches concurrently — Apple and Google can be served at
+    // once instead of sequentially, halving startup latency on a warm cache.
+    let mut all_urls: Vec<String> = vec![primary_url.to_string()];
+    all_urls.extend(additional_urls.iter().cloned());
+    let fetches = all_urls.iter().map(|u| {
+        let c = client.clone();
+        let url = u.clone();
+        async move { (url.clone(), fetch_one_list(&c, &url).await) }
+    });
+    let results = join_all(fetches).await;
+
+    let mut candidates: Vec<CtLog> = Vec::new();
+    let mut seen_ids: HashSet<String> = HashSet::new();
+    let mut had_success = false;
+    for (url, res) in results {
+        match res {
+            Ok(logs) => {
+                had_success = true;
+                let raw_count = logs.len();
+                let mut added = 0usize;
+                for log in logs {
+                    if let Some(ref id) = log.log_id
+                        && !seen_ids.insert(id.clone())
+                    {
+                        continue;
+                    }
+                    candidates.push(log);
+                    added += 1;
+                }
+                info!(url = %url, total = raw_count, deduped = added, "fetched log list");
+            }
+            Err(e) => {
+                warn!(url = %url, error = %e, "failed to fetch log list, continuing with remaining sources");
+            }
+        }
+    }
+    if !had_success {
+        return Err(LogListError::NoLogs);
+    }
+
+    let candidate_logs: Vec<CtLog> = candidates.into_iter().filter(|l| l.is_usable()).collect();
     info!(count = candidate_logs.len(), "checking CT log availability");
 
     let health_checks: Vec<_> = candidate_logs
@@ -359,5 +462,100 @@ mod tests {
         assert_eq!(LogType::Rfc6962, LogType::Rfc6962);
         assert_eq!(LogType::StaticCt, LogType::StaticCt);
         assert_ne!(LogType::Rfc6962, LogType::StaticCt);
+    }
+
+    #[test]
+    fn test_submission_url_to_origin_strips_https_and_slash() {
+        assert_eq!(
+            submission_url_to_origin("https://ct.cloudflare.com/logs/raio2025h2b/"),
+            "ct.cloudflare.com/logs/raio2025h2b"
+        );
+    }
+
+    #[test]
+    fn test_submission_url_to_origin_no_trailing() {
+        assert_eq!(
+            submission_url_to_origin("https://log.sycamore.ct.letsencrypt.org/2026h1"),
+            "log.sycamore.ct.letsencrypt.org/2026h1"
+        );
+    }
+
+    #[test]
+    fn test_submission_url_to_origin_http() {
+        assert_eq!(
+            submission_url_to_origin("http://example.test/foo/"),
+            "example.test/foo"
+        );
+    }
+
+    /// Apple's log list adds `assetVersionV2` and `tiled_logs` and may include
+    /// operators with empty (or missing) `logs` arrays. The parser must accept
+    /// all of these.
+    #[test]
+    fn test_parse_apple_style_log_list() {
+        let json = r#"{
+            "$schema": "https://example.com/schema.json",
+            "assetVersion": 32,
+            "assetVersionV2": 1013,
+            "operators": [
+                {
+                    "name": "Cloudflare",
+                    "email": ["ct-logs@cloudflare.com"],
+                    "logs": [],
+                    "tiled_logs": [
+                        {
+                            "description": "Cloudflare 'Raio2025h2b' log",
+                            "key": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAESwiXfU4...",
+                            "log_id": "Tw05u8NV28wWJ5ZuVAUVfMr3Lj90j0f+ewSeWlkVXL0=",
+                            "mmd": 60,
+                            "monitoring_url": "https://raio2025h2b.ct.cloudflare.com/",
+                            "submission_url": "https://ct.cloudflare.com/logs/raio2025h2b/",
+                            "state": {"usable": {"timestamp": "2025-07-01T00:00:00Z"}},
+                            "tls_only": true
+                        }
+                    ]
+                },
+                {
+                    "name": "Old Operator",
+                    "logs": [
+                        {
+                            "description": "Old RFC6962 log",
+                            "url": "https://old.example.com/ct",
+                            "log_id": "abcdef==",
+                            "state": {"usable": {"timestamp": "2024-01-01T00:00:00Z"}}
+                        }
+                    ]
+                }
+            ]
+        }"#;
+        let parsed: LogListResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.operators.len(), 2);
+        assert_eq!(parsed.operators[0].name, "Cloudflare");
+        assert!(parsed.operators[0].logs.is_empty());
+        assert_eq!(parsed.operators[0].tiled_logs.len(), 1);
+        let tiled = &parsed.operators[0].tiled_logs[0];
+        assert_eq!(tiled.monitoring_url, "https://raio2025h2b.ct.cloudflare.com/");
+        assert_eq!(tiled.submission_url, "https://ct.cloudflare.com/logs/raio2025h2b/");
+        assert_eq!(tiled.log_id.as_deref(), Some("Tw05u8NV28wWJ5ZuVAUVfMr3Lj90j0f+ewSeWlkVXL0="));
+
+        assert_eq!(parsed.operators[1].name, "Old Operator");
+        assert_eq!(parsed.operators[1].logs.len(), 1);
+        assert!(parsed.operators[1].tiled_logs.is_empty());
+    }
+
+    #[test]
+    fn test_parse_legacy_google_v3_no_tiled_logs() {
+        // Older Google v3 responses (and minimal test fixtures) have no
+        // `tiled_logs` field at all — the default must populate an empty Vec.
+        let json = r#"{
+            "operators": [
+                {"name": "Google", "logs": [
+                    {"description": "Argon2026", "url": "https://ct.googleapis.com/logs/argon2026/"}
+                ]}
+            ]
+        }"#;
+        let parsed: LogListResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.operators[0].logs.len(), 1);
+        assert!(parsed.operators[0].tiled_logs.is_empty());
     }
 }
