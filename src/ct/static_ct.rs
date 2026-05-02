@@ -31,6 +31,38 @@ pub struct TileLeaf {
     pub cert_der: Vec<u8>,
     pub is_precert: bool,
     pub chain_fingerprints: Vec<[u8; 32]>,
+    /// `leaf_index` extension from `CtExtensions` (static-ct-api v1.0.0-rc.1).
+    /// 0-based log index of this entry. `None` if the log hasn't populated the
+    /// extension yet (older logs / draft conformance). When present, it must
+    /// match `tile_start_index + offset_in_tile`; a mismatch is logged as an
+    /// integrity warning.
+    pub leaf_index: Option<u64>,
+}
+
+/// Parse a `CtExtensions` blob and return the `leaf_index` value (extension
+/// type 0, big-endian unsigned 40-bit) when present. The extensions vector is
+/// `Extension*` where each `Extension` is `1B type + 2B len + len bytes data`.
+/// Unknown extensions are skipped to remain forward-compatible.
+fn parse_leaf_index_ext(ext_bytes: &[u8]) -> Option<u64> {
+    let mut i = 0;
+    while i + 3 <= ext_bytes.len() {
+        let ext_type = ext_bytes[i];
+        let data_len = u16::from_be_bytes([ext_bytes[i + 1], ext_bytes[i + 2]]) as usize;
+        i += 3;
+        if i + data_len > ext_bytes.len() {
+            return None;
+        }
+        if ext_type == 0 && data_len == 5 {
+            // 40-bit big-endian unsigned integer
+            let mut acc: u64 = 0;
+            for &b in &ext_bytes[i..i + 5] {
+                acc = (acc << 8) | b as u64;
+            }
+            return Some(acc);
+        }
+        i += data_len;
+    }
+    None
 }
 
 const MAX_ISSUER_CACHE_SIZE: u64 = 10_000;
@@ -227,6 +259,7 @@ fn parse_one_leaf(data: &[u8], offset: &mut usize) -> Option<TileLeaf> {
         if *offset + ext_len > data.len() {
             return None;
         }
+        let leaf_index = parse_leaf_index_ext(&data[*offset..*offset + ext_len]);
         *offset += ext_len;
 
         if *offset + 3 > data.len() {
@@ -241,22 +274,7 @@ fn parse_one_leaf(data: &[u8], offset: &mut usize) -> Option<TileLeaf> {
         cert_der = data[*offset..*offset + precert_len].to_vec();
         *offset += precert_len;
 
-        if *offset + 2 > data.len() {
-            return None;
-        }
-        let chain_count = u16::from_be_bytes(data[*offset..*offset + 2].try_into().ok()?) as usize;
-        *offset += 2;
-
-        let mut chain_fingerprints = Vec::with_capacity(chain_count);
-        for _ in 0..chain_count {
-            if *offset + 32 > data.len() {
-                return None;
-            }
-            let mut fp = [0u8; 32];
-            fp.copy_from_slice(&data[*offset..*offset + 32]);
-            chain_fingerprints.push(fp);
-            *offset += 32;
-        }
+        let chain_fingerprints = read_chain_fingerprints(data, offset)?;
 
         return Some(TileLeaf {
             submission_timestamp,
@@ -264,6 +282,7 @@ fn parse_one_leaf(data: &[u8], offset: &mut usize) -> Option<TileLeaf> {
             cert_der,
             is_precert,
             chain_fingerprints,
+            leaf_index,
         });
     } else {
         return None;
@@ -277,24 +296,10 @@ fn parse_one_leaf(data: &[u8], offset: &mut usize) -> Option<TileLeaf> {
     if *offset + ext_len > data.len() {
         return None;
     }
+    let leaf_index = parse_leaf_index_ext(&data[*offset..*offset + ext_len]);
     *offset += ext_len;
 
-    if *offset + 2 > data.len() {
-        return None;
-    }
-    let chain_count = u16::from_be_bytes(data[*offset..*offset + 2].try_into().ok()?) as usize;
-    *offset += 2;
-
-    let mut chain_fingerprints = Vec::with_capacity(chain_count);
-    for _ in 0..chain_count {
-        if *offset + 32 > data.len() {
-            return None;
-        }
-        let mut fp = [0u8; 32];
-        fp.copy_from_slice(&data[*offset..*offset + 32]);
-        chain_fingerprints.push(fp);
-        *offset += 32;
-    }
+    let chain_fingerprints = read_chain_fingerprints(data, offset)?;
 
     Some(TileLeaf {
         submission_timestamp,
@@ -302,7 +307,37 @@ fn parse_one_leaf(data: &[u8], offset: &mut usize) -> Option<TileLeaf> {
         cert_der,
         is_precert,
         chain_fingerprints,
+        leaf_index,
     })
+}
+
+/// Read a static-ct-api `Fingerprint certificate_chain<0..2^16-1>` field.
+///
+/// Spec note: the 2-byte prefix is the **byte length** of the chain blob, not
+/// a fingerprint count (TLS presentation language `<lo..hi>` denotes byte
+/// extents). The body is therefore exactly `byte_len / 32` consecutive 32-byte
+/// fingerprints; a non-multiple-of-32 length is malformed.
+fn read_chain_fingerprints(data: &[u8], offset: &mut usize) -> Option<Vec<[u8; 32]>> {
+    if *offset + 2 > data.len() {
+        return None;
+    }
+    let byte_len = u16::from_be_bytes(data[*offset..*offset + 2].try_into().ok()?) as usize;
+    *offset += 2;
+    if !byte_len.is_multiple_of(32) {
+        return None;
+    }
+    if *offset + byte_len > data.len() {
+        return None;
+    }
+    let count = byte_len / 32;
+    let mut fingerprints = Vec::with_capacity(count);
+    for _ in 0..count {
+        let mut fp = [0u8; 32];
+        fp.copy_from_slice(&data[*offset..*offset + 32]);
+        fingerprints.push(fp);
+        *offset += 32;
+    }
+    Some(fingerprints)
 }
 
 fn read_u24(data: &[u8], offset: usize) -> Option<usize> {
@@ -429,6 +464,12 @@ pub async fn run_static_ct_watcher(log: CtLog, ctx: WatcherContext) {
 
     let checkpoint_url = format!("{}/checkpoint", base_url);
 
+    // Tracks the highest tree_size we've observed for rollback detection.
+    // A static-CT log's tree_size must be monotonically non-decreasing; if the
+    // server returns a smaller value we assume an operator bug or transient
+    // serving inconsistency, log it, and refuse to advance.
+    let mut high_water_tree_size: u64 = 0;
+
     let mut current_index = if let Some(saved_index) = state_manager.get_index(&base_url) {
         info!(log = %log.description, saved_index = saved_index, "resuming from saved state");
         saved_index
@@ -485,7 +526,7 @@ pub async fn run_static_ct_watcher(log: CtLog, ctx: WatcherContext) {
             sleep(Duration::from_secs(config.health_check_interval_secs)).await;
         }
 
-        let tree_size = match client.get(&checkpoint_url).timeout(timeout).send().await {
+        let raw_tree_size = match client.get(&checkpoint_url).timeout(timeout).send().await {
             Ok(resp) => {
                 let status = resp.status();
                 if status.as_u16() == 429 {
@@ -549,6 +590,25 @@ pub async fn run_static_ct_watcher(log: CtLog, ctx: WatcherContext) {
                 continue;
             }
         };
+
+        // Tree-size monotonicity check: a static-CT log's tree_size never
+        // shrinks. A regression indicates an operator bug, an incomplete
+        // checkpoint replica, or a partial deployment — back off and retry
+        // rather than reading stale tiles.
+        if raw_tree_size < high_water_tree_size {
+            warn!(
+                log = %log.description,
+                got = raw_tree_size,
+                high_water = high_water_tree_size,
+                "tree_size went backwards; refusing to advance"
+            );
+            metrics::counter!("certstream_static_ct_tree_size_rollbacks", "log" => log_name.clone()).increment(1);
+            health.record_failure(config.unhealthy_threshold);
+            sleep(health.get_backoff()).await;
+            continue;
+        }
+        high_water_tree_size = raw_tree_size;
+        let tree_size = raw_tree_size;
 
         if current_index >= tree_size {
             // Keep the tracker current even when fully caught up so that /api/logs
@@ -622,6 +682,31 @@ pub async fn run_static_ct_watcher(log: CtLog, ctx: WatcherContext) {
                             let data = decompress_tile(&raw_data);
                             let leaves = parse_tile_leaves(&data);
 
+                            // Static-CT-API rc.1: a tile must contain exactly
+                            // `entries_in_tile` leaves (256 for full, partial
+                            // width for the last). Mismatches indicate either
+                            // a corrupt fetch (truncated body) or a server
+                            // serving stale partials — drop the tile and
+                            // retry rather than emitting partial data.
+                            if (leaves.len() as u64) != entries_in_tile {
+                                warn!(
+                                    log = %log.description,
+                                    tile = tile_index,
+                                    got = leaves.len(),
+                                    expected = entries_in_tile,
+                                    partial = is_last_tile && entries_in_tile < 256,
+                                    "tile leaf count mismatch; skipping"
+                                );
+                                metrics::counter!(
+                                    "certstream_static_ct_tile_width_mismatch",
+                                    "log" => log_name.clone()
+                                )
+                                .increment(1);
+                                health.record_failure(config.unhealthy_threshold);
+                                sleep(health.get_backoff()).await;
+                                break 'tile_loop;
+                            }
+
                             let tile_start_index = tile_index * 256;
                             let offset_in_tile = if current_index > tile_start_index {
                                 (current_index - tile_start_index) as usize
@@ -650,6 +735,28 @@ pub async fn run_static_ct_watcher(log: CtLog, ctx: WatcherContext) {
 
                             for (i, leaf) in leaves.iter().enumerate().skip(offset_in_tile) {
                                 let cert_index = tile_start_index + i as u64;
+
+                                // Static-CT-API rc.1: when the log populates
+                                // the leaf_index SCT extension, it must equal
+                                // the entry's tile-derived index. Mismatches
+                                // are integrity violations (or operator bugs)
+                                // — count them but continue with our index,
+                                // which is grounded in tile coordinates.
+                                if let Some(li) = leaf.leaf_index
+                                    && li != cert_index
+                                {
+                                    warn!(
+                                        log = %log.description,
+                                        expected = cert_index,
+                                        got = li,
+                                        "leaf_index extension disagrees with tile-derived index"
+                                    );
+                                    metrics::counter!(
+                                        "certstream_static_ct_leaf_index_mismatch",
+                                        "log" => log_name.clone()
+                                    )
+                                    .increment(1);
+                                }
 
                                 let parsed = match parse_certificate(&leaf.cert_der, true) {
                                     Some(p) => p,
@@ -910,29 +1017,49 @@ mod tests {
         assert_eq!(&cache.get(&fp99).unwrap()[..], &[99]);
     }
 
-    /// Build a synthetic x509 tile entry.
-    fn build_x509_entry(timestamp: u64, cert_der: &[u8], chain_fps: &[[u8; 32]]) -> Vec<u8> {
+    /// Build a synthetic x509 tile entry. `extensions` is the raw `CtExtensions`
+    /// body (without the 2-byte length prefix); pass `&[]` for legacy-empty.
+    fn build_x509_entry_with_ext(
+        timestamp: u64,
+        cert_der: &[u8],
+        chain_fps: &[[u8; 32]],
+        extensions: &[u8],
+    ) -> Vec<u8> {
         let mut data = Vec::new();
-        // 8 bytes timestamp
         data.extend_from_slice(&timestamp.to_be_bytes());
-        // 2 bytes entry_type = 0 (x509)
         data.extend_from_slice(&0u16.to_be_bytes());
-        // 3 bytes cert length
         let cert_len = cert_der.len() as u32;
         data.push((cert_len >> 16) as u8);
         data.push((cert_len >> 8) as u8);
         data.push(cert_len as u8);
-        // cert DER
         data.extend_from_slice(cert_der);
-        // 2 bytes extensions length = 0
-        data.extend_from_slice(&0u16.to_be_bytes());
-        // 2 bytes chain count
-        data.extend_from_slice(&(chain_fps.len() as u16).to_be_bytes());
-        // chain fingerprints
+        data.extend_from_slice(&(extensions.len() as u16).to_be_bytes());
+        data.extend_from_slice(extensions);
+        // 2-byte BYTE-length prefix per static-ct-api `<0..2^16-1>` framing.
+        data.extend_from_slice(&((chain_fps.len() * 32) as u16).to_be_bytes());
         for fp in chain_fps {
             data.extend_from_slice(fp);
         }
         data
+    }
+
+    fn build_x509_entry(timestamp: u64, cert_der: &[u8], chain_fps: &[[u8; 32]]) -> Vec<u8> {
+        build_x509_entry_with_ext(timestamp, cert_der, chain_fps, &[])
+    }
+
+    /// Build a `leaf_index` extension blob suitable for `extensions` in
+    /// `build_x509_entry_with_ext`. `index` is encoded as a 5-byte big-endian
+    /// unsigned integer per static-ct-api v1.0.0-rc.1.
+    fn build_leaf_index_ext(index: u64) -> Vec<u8> {
+        let mut v = Vec::with_capacity(8);
+        v.push(0); // extension_type = leaf_index(0)
+        v.extend_from_slice(&5u16.to_be_bytes()); // extension_data length
+        v.push((index >> 32) as u8);
+        v.push((index >> 24) as u8);
+        v.push((index >> 16) as u8);
+        v.push((index >> 8) as u8);
+        v.push(index as u8);
+        v
     }
 
     /// Build a synthetic precert tile entry.
@@ -967,7 +1094,8 @@ mod tests {
         // pre-certificate DER
         data.extend_from_slice(precert_der);
         // 2 bytes chain count
-        data.extend_from_slice(&(chain_fps.len() as u16).to_be_bytes());
+        // 2-byte BYTE-length prefix per static-ct-api `<0..2^16-1>` framing.
+        data.extend_from_slice(&((chain_fps.len() * 32) as u16).to_be_bytes());
         // chain fingerprints
         for fp in chain_fps {
             data.extend_from_slice(fp);
@@ -975,7 +1103,7 @@ mod tests {
         data
     }
 
-    #[test]
+#[test]
     fn test_parse_tile_leaves_single_x509() {
         let cert = b"fake_cert_der_data";
         let fp1 = [0xaa; 32];
@@ -989,6 +1117,62 @@ mod tests {
         assert_eq!(leaves[0].cert_der, cert);
         assert_eq!(leaves[0].chain_fingerprints.len(), 1);
         assert_eq!(leaves[0].chain_fingerprints[0], fp1);
+        assert_eq!(leaves[0].leaf_index, None);
+    }
+
+    #[test]
+    fn test_parse_leaf_index_ext_present() {
+        let ext = build_leaf_index_ext(0x123456789a);
+        assert_eq!(parse_leaf_index_ext(&ext), Some(0x123456789a));
+    }
+
+    #[test]
+    fn test_parse_leaf_index_ext_zero() {
+        let ext = build_leaf_index_ext(0);
+        assert_eq!(parse_leaf_index_ext(&ext), Some(0));
+    }
+
+    #[test]
+    fn test_parse_leaf_index_ext_max_40bit() {
+        // (1 << 40) - 1 fills all 5 bytes.
+        let ext = build_leaf_index_ext((1u64 << 40) - 1);
+        assert_eq!(parse_leaf_index_ext(&ext), Some((1u64 << 40) - 1));
+    }
+
+    #[test]
+    fn test_parse_leaf_index_ext_empty() {
+        assert_eq!(parse_leaf_index_ext(&[]), None);
+    }
+
+    #[test]
+    fn test_parse_leaf_index_ext_unknown_only() {
+        // type=42, len=3, data=[1,2,3]. No leaf_index → None.
+        let blob = vec![42, 0, 3, 1, 2, 3];
+        assert_eq!(parse_leaf_index_ext(&blob), None);
+    }
+
+    #[test]
+    fn test_parse_leaf_index_ext_skip_unknown_then_match() {
+        // unknown ext (type=10, 2-byte payload) followed by leaf_index.
+        let mut blob = vec![10, 0, 2, 0xaa, 0xbb];
+        blob.extend_from_slice(&build_leaf_index_ext(7));
+        assert_eq!(parse_leaf_index_ext(&blob), Some(7));
+    }
+
+    #[test]
+    fn test_parse_tile_leaves_x509_with_leaf_index() {
+        let ext = build_leaf_index_ext(42);
+        let data = build_x509_entry_with_ext(1_700_000_000_000, b"cert", &[], &ext);
+        let leaves = parse_tile_leaves(&data);
+        assert_eq!(leaves.len(), 1);
+        assert_eq!(leaves[0].leaf_index, Some(42));
+    }
+
+    #[test]
+    fn test_parse_tile_leaves_truncated_ext_data_returns_none() {
+        // ext type=0, declared len=5, but only 4 data bytes present.
+        let bad_ext = vec![0, 0, 5, 1, 2, 3, 4];
+        assert_eq!(parse_leaf_index_ext(&bad_ext), None);
     }
 
     #[test]
@@ -1009,6 +1193,31 @@ mod tests {
         assert_eq!(leaves[0].chain_fingerprints.len(), 2);
         assert_eq!(leaves[0].chain_fingerprints[0], fp1);
         assert_eq!(leaves[0].chain_fingerprints[1], fp2);
+    }
+
+    #[test]
+    fn test_parse_tile_leaves_long_chain_recovers_full_count() {
+        // Regression: the chain field is `Fingerprint<0..2^16-1>` — a byte-length
+        // prefix, not a fingerprint count. A pre-1.4 bug treated the prefix as
+        // a count, consuming subsequent leaves' bytes as fingerprint data.
+        let chain: Vec<[u8; 32]> = (0..64).map(|i| [i as u8; 32]).collect();
+        let mut data = Vec::new();
+        data.extend_from_slice(&build_x509_entry(1, b"a", &chain));
+        data.extend_from_slice(&build_x509_entry(2, b"b", &chain));
+        data.extend_from_slice(&build_x509_entry(3, b"c", &chain));
+        let leaves = parse_tile_leaves(&data);
+        assert_eq!(leaves.len(), 3);
+        assert_eq!(leaves[1].chain_fingerprints.len(), 64);
+        assert_eq!(leaves[2].submission_timestamp, 3);
+    }
+
+    #[test]
+    fn test_read_chain_fingerprints_rejects_non_aligned_length() {
+        // 2-byte length = 33 (not a multiple of 32) → malformed, parser
+        // refuses to advance.
+        let data: Vec<u8> = vec![0x00, 0x21, 0u8, 0u8, 0u8];
+        let mut offset = 0;
+        assert!(read_chain_fingerprints(&data, &mut offset).is_none());
     }
 
     #[test]
