@@ -72,6 +72,17 @@ pub struct CtLogConfig {
     pub batch_size: u64,
     #[serde(default = "default_poll_interval_ms")]
     pub poll_interval_ms: u64,
+    /// Master switch for the legacy RFC 6962 watcher pool. When `false`, the
+    /// Google v3 log list (and any `custom_logs`) are skipped at startup.
+    /// Override with `CERTSTREAM_RFC6962_ENABLED`.
+    #[serde(default = "default_true")]
+    pub rfc6962_enabled: bool,
+    /// Master switch for the static-CT (Sunlight / static-ct-api) watchers.
+    /// When `false`, both `static_logs` and any tiled logs discovered via the
+    /// log list are skipped at startup.
+    /// Override with `CERTSTREAM_STATIC_CT_ENABLED`.
+    #[serde(default = "default_true")]
+    pub static_ct_enabled: bool,
 }
 
 impl Default for CtLogConfig {
@@ -87,6 +98,8 @@ impl Default for CtLogConfig {
             state_file: default_state_file(),
             batch_size: default_batch_size(),
             poll_interval_ms: default_poll_interval_ms(),
+            rfc6962_enabled: true,
+            static_ct_enabled: true,
         }
     }
 }
@@ -234,6 +247,30 @@ fn default_burst_window_seconds() -> u64 {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+pub struct DedupConfig {
+    #[serde(default = "default_dedup_capacity")]
+    pub capacity: usize,
+    #[serde(default = "default_dedup_ttl_secs")]
+    pub ttl_secs: u64,
+}
+
+impl Default for DedupConfig {
+    fn default() -> Self {
+        Self {
+            capacity: default_dedup_capacity(),
+            ttl_secs: default_dedup_ttl_secs(),
+        }
+    }
+}
+
+fn default_dedup_capacity() -> usize {
+    1_000_000
+}
+fn default_dedup_ttl_secs() -> u64 {
+    900
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct ApiConfig {
     #[serde(default = "default_cache_capacity")]
     pub cache_capacity: usize,
@@ -320,6 +357,11 @@ pub struct Config {
     pub log_level: String,
     pub buffer_size: usize,
     pub ct_logs_url: String,
+    /// Additional log-list URLs to fetch in parallel and merge with the primary
+    /// list. Apple's `current_log_list.json` is the canonical second source: it
+    /// surfaces `tiled_logs` for static-ct-api operators that may not yet appear
+    /// in Google's v3 list. Logs appearing in both lists are deduped by `log_id`.
+    pub additional_log_lists: Vec<String>,
     pub tls_cert: Option<String>,
     pub tls_key: Option<String>,
     pub custom_logs: Vec<CustomCtLog>,
@@ -332,6 +374,7 @@ pub struct Config {
     pub auth: AuthConfig,
     pub hot_reload: HotReloadConfig,
     pub streams: StreamConfig,
+    pub dedup: DedupConfig,
     pub config_path: Option<String>,
 }
 
@@ -342,6 +385,8 @@ struct YamlConfig {
     log_level: Option<String>,
     buffer_size: Option<usize>,
     ct_logs_url: Option<String>,
+    #[serde(default)]
+    additional_log_lists: Vec<String>,
     tls_cert: Option<String>,
     tls_key: Option<String>,
     #[serde(default)]
@@ -364,6 +409,8 @@ struct YamlConfig {
     hot_reload: Option<HotReloadConfig>,
     #[serde(default)]
     streams: Option<StreamConfig>,
+    #[serde(default)]
+    dedup: Option<DedupConfig>,
 }
 
 struct YamlConfigWithPath {
@@ -412,6 +459,25 @@ impl Config {
             .unwrap_or_else(|| {
                 "https://www.gstatic.com/ct/log_list/v3/log_list.json".to_string()
             });
+
+        // Comma-separated env override; falls back to YAML; otherwise defaults
+        // to Apple's canonical list. Pass an empty string in the env to opt
+        // out (e.g. CERTSTREAM_ADDITIONAL_LOG_LISTS=).
+        let additional_log_lists: Vec<String> = match env::var("CERTSTREAM_ADDITIONAL_LOG_LISTS") {
+            Ok(v) if v.trim().is_empty() => Vec::new(),
+            Ok(v) => v
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect(),
+            Err(_) => {
+                if !yaml_config.additional_log_lists.is_empty() {
+                    yaml_config.additional_log_lists
+                } else {
+                    vec!["https://valid.apple.com/ct/log_list/current_log_list.json".to_string()]
+                }
+            }
+        };
 
         let tls_cert = env::var("CERTSTREAM_TLS_CERT").ok().or(yaml_config.tls_cert);
         let tls_key = env::var("CERTSTREAM_TLS_KEY").ok().or(yaml_config.tls_key);
@@ -467,6 +533,12 @@ impl Config {
         if let Ok(v) = env::var("CERTSTREAM_CT_LOG_POLL_INTERVAL_MS") {
             ct_log.poll_interval_ms = v.parse().unwrap_or(ct_log.poll_interval_ms);
         }
+        if let Ok(v) = env::var("CERTSTREAM_RFC6962_ENABLED") {
+            ct_log.rfc6962_enabled = v.parse().unwrap_or(ct_log.rfc6962_enabled);
+        }
+        if let Ok(v) = env::var("CERTSTREAM_STATIC_CT_ENABLED") {
+            ct_log.static_ct_enabled = v.parse().unwrap_or(ct_log.static_ct_enabled);
+        }
 
         let mut connection_limit = yaml_config.connection_limit.unwrap_or_default();
         if let Ok(v) = env::var("CERTSTREAM_CONNECTION_LIMIT_ENABLED") {
@@ -505,6 +577,14 @@ impl Config {
             hot_reload.watch_path = Some(v);
         }
 
+        let mut dedup = yaml_config.dedup.unwrap_or_default();
+        if let Ok(v) = env::var("CERTSTREAM_DEDUP_CAPACITY") {
+            dedup.capacity = v.parse().unwrap_or(dedup.capacity);
+        }
+        if let Ok(v) = env::var("CERTSTREAM_DEDUP_TTL_SECS") {
+            dedup.ttl_secs = v.parse().unwrap_or(dedup.ttl_secs);
+        }
+
         let mut streams = yaml_config.streams.unwrap_or_default();
         if let Ok(v) = env::var("CERTSTREAM_STREAM_FULL_ENABLED") {
             streams.full = v.parse().unwrap_or(streams.full);
@@ -522,6 +602,7 @@ impl Config {
             log_level,
             buffer_size,
             ct_logs_url,
+            additional_log_lists,
             tls_cert,
             tls_key,
             custom_logs: yaml_config.custom_logs,
@@ -534,6 +615,7 @@ impl Config {
             auth,
             hot_reload,
             streams,
+            dedup,
             config_path,
         }
     }
@@ -650,6 +732,7 @@ mod tests {
             log_level: "info".to_string(),
             buffer_size: 1000,
             ct_logs_url: "https://example.com".to_string(),
+            additional_log_lists: vec![],
             tls_cert: None,
             tls_key: None,
             custom_logs: vec![],
@@ -662,6 +745,7 @@ mod tests {
             auth: AuthConfig::default(),
             hot_reload: HotReloadConfig::default(),
             streams: StreamConfig::default(),
+            dedup: DedupConfig::default(),
             config_path: None,
         }
     }
@@ -685,6 +769,19 @@ mod tests {
         assert_eq!(config.state_file, Some("certstream_state.json".to_string()));
         assert_eq!(config.batch_size, 256);
         assert_eq!(config.poll_interval_ms, 1000);
+        assert!(config.rfc6962_enabled);
+        assert!(config.static_ct_enabled);
+    }
+
+    #[test]
+    fn test_ct_log_config_disable_flags() {
+        let yaml = r#"
+rfc6962_enabled: false
+static_ct_enabled: false
+"#;
+        let config: CtLogConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(!config.rfc6962_enabled);
+        assert!(!config.static_ct_enabled);
     }
 
     #[test]

@@ -25,7 +25,11 @@ This Rust implementation delivers better performance than certstream-server-go w
 
 - WebSocket and Server-Sent Events (SSE)
 - Pre-serialized messages for efficient broadcasting
-- 60+ Certificate Transparency logs monitored (Google, Cloudflare, DigiCert, Sectigo, Let's Encrypt)
+- 80+ Certificate Transparency logs monitored across both Google and Apple log lists (Google, Cloudflare, DigiCert, Sectigo, Let's Encrypt, Geomys, IPng Networks, TrustAsia, …)
+- **Static-CT-API v1.0.0-rc.1 support** — checkpoint + tile protocol used by Let's Encrypt's Sycamore/Willow, Cloudflare Raio, IPng Halloumi/Gouda, Geomys Tuscolo, TrustAsia Luoshu and other 2026 logs
+- **Tiled-log discovery** — `operators[].tiled_logs[]` auto-merged from Apple + Google lists, deduped by `log_id`
+- Cross-log dedup with tunable capacity/TTL (defaults 1M entries / 15-minute window)
+- Runtime kill switches per protocol family: `CERTSTREAM_RFC6962_ENABLED`, `CERTSTREAM_STATIC_CT_ENABLED`
 - State persistence - resume from last position after restart
 - Connection limiting - protect against abuse with per-IP and total limits
 - Token authentication - Bearer token based API access control
