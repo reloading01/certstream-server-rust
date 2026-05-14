@@ -5,6 +5,7 @@ A high-performance **certstream server** written in Rust. Monitors Certificate T
 [![GHCR](https://img.shields.io/badge/ghcr.io-reloading01%2Fcertstream--server--rust-blue?logo=github)](https://github.com/reloading01/certstream-server-rust/pkgs/container/certstream-server-rust)
 [![Rust](https://img.shields.io/badge/rust-1.88%2B-orange.svg)](https://www.rust-lang.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
+[![Sponsor](https://img.shields.io/badge/sponsor-%E2%9D%A4-ff69b4?logo=githubsponsors)](https://github.com/sponsors/reloading01)
 
 ## What is Certstream?
 
@@ -229,6 +230,12 @@ Certstream monitors 50+ CT logs from all Chrome-trusted providers:
 ## Release Notes
 
 See [RELEASE_NOTES.md](RELEASE_NOTES.md) for version history.
+
+## Support
+
+I work on this in my free time. If you find it useful, just using it, starring the repo, or sharing it with someone who needs it already means a lot to me that's the kind of thing that keeps me going.
+
+If you'd like to go a step further, you can also [sponsor me on GitHub](https://github.com/sponsors/reloading01). No pressure though, every form of support is appreciated.
 
 ## License
 
