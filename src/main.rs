@@ -640,25 +640,30 @@ fn build_router(protocols: &config::ProtocolConfig, config: &Config, deps: Route
         protected_app
     };
 
+    if config.connection_limit.enabled {
+        let conn_limiter = connection_limiter.clone();
+        let cl_cancel = shutdown_token.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(300));
+            loop {
+                tokio::select! {
+                    _ = cl_cancel.cancelled() => break,
+                    _ = interval.tick() => conn_limiter.cleanup_stale(),
+                }
+            }
+        });
+    }
+
     let protected_app = if config.rate_limit.enabled {
         info!("rate limiting enabled (token bucket + sliding window)");
         let limiter = rate_limiter.clone();
-        let conn_limiter = connection_limiter.clone();
         let rate_limit_cancel = shutdown_token.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(300));
             loop {
                 tokio::select! {
                     _ = rate_limit_cancel.cancelled() => break,
-                    _ = interval.tick() => {
-                        limiter.cleanup_stale(Duration::from_secs(600));
-                        // ConnectionLimiter zombie sweep — see middleware.rs.
-                        // Coupled to rate_limit.enabled because we share the
-                        // tick; if rate_limit is off the sweep doesn't run,
-                        // which is still strictly better than v1.5.x (no sweep
-                        // at all). Decoupling is a follow-up.
-                        conn_limiter.cleanup_stale();
-                    }
+                    _ = interval.tick() => limiter.cleanup_stale(Duration::from_secs(600)),
                 }
             }
         });
