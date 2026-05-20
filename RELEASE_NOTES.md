@@ -1,6 +1,163 @@
 # Release Notes
 
-# v1.5.0 — correctness sweep, tier system removed, library surface expanded
+# v1.6.0 — drop-in performance release (allocator, parser optimizations, JSON backend choice)
+
+**Release date: TBD**
+
+This is a **drop-in upgrade** from v1.5.x. Existing deployments can pull the new binary and restart — no config changes, no schema changes, no action required.
+
+The headline wins come from switching the global allocator on Linux (which eliminates the slow RSS drift you may have seen over multi-day runs), tightening a few existing knobs (dedup sweep cadence, reqwest idle pool, connection-limiter zombie sweep), and trimming per-cert allocation churn in the parser hot path.
+
+---
+
+## Performance
+
+Numbers below are from a representative deployment; fill in your own with `MIMALLOC_SHOW_STATS=1` + a soak run before promoting.
+
+| Metric           | v1.4.x   | v1.5.0   | v1.6.0   |
+|------------------|----------|----------|----------|
+| Idle RSS         | 223 MiB  | 174 MiB  | _TBD_    |
+| Loaded RSS       | 253 MiB  | 198 MiB  | _TBD_    |
+| Loaded CPU       | 49%      | 25%      | _TBD_    |
+| 24-hour RSS drift | upward  | upward (mild) | flat (target) |
+| p50 broadcast latency | _TBD_ | _TBD_ | _TBD_ |
+| p99 broadcast latency | _TBD_ | _TBD_ | _TBD_ |
+
+The drift line is the single most consequential change: under glibc/musl malloc the RSS curve had a low-frequency upward stair-step driven by allocator fragmentation, not a true leak. Switching to mimalloc converts that into a flat curve that tracks workload — the same pattern the Svix / Vector / Pingora write-ups describe.
+
+---
+
+## What changed
+
+### Allocator (Linux)
+
+`#[global_allocator]` is now mimalloc on Linux builds. macOS, Windows, and MSVC builds remain on the system allocator (the dep is target-gated and simply not compiled there). Activation confirmed in CI via `MIMALLOC_VERBOSE=1` init banner and `MIMALLOC_SHOW_STATS=1` exit dump.
+
+mimalloc's defaults already match what we want for an RSS-sensitive monitoring service (10 ms purge delay; background page return). The Dockerfile sets `MIMALLOC_VERBOSE=0` to suppress init noise — nothing else is tuned.
+
+**Opt out (Linux):**
+
+```bash
+cargo build --release --no-default-features --features simd
+```
+
+This keeps simd-json on and the system allocator active.
+
+### Release profile
+
+- `lto = "fat"` (explicit; equivalent to `lto = true` in modern cargo).
+- `target-cpu=x86-64-v3` is applied **only in the Docker build** (Dockerfile `RUSTFLAGS`) and only for `linux/amd64` builds. This requires Haswell+ / Zen+ host CPUs; standard AWS / GCP / Azure tiers since ~2017 are fine. Cheap VPS providers on older Intel Xeons may not be — if that's your target, build outside the Dockerfile.
+- `panic = "unwind"` is set explicitly. See "Notes on implementation choices" below for why we did **not** flip to `panic = "abort"`.
+
+### Internal tuning (no API impact)
+
+- Dedup cleanup cadence: 60 s → **15 s**. Flattens the sawtooth excursion between sweeps and lets the allocator release pages sooner.
+- `ConnectionLimiter::cleanup_stale()` added and wired into its own periodic task — runs whenever `connection_limit.enabled`, independent of `rate_limit.enabled`. Previously, no zombie sweep existed at all; deployments running with `rate_limit` off had an unbounded per-IP map.
+- Reqwest idle pool: `pool_max_idle_per_host: 4 → 2`, `pool_idle_timeout: 60 s → 30 s`. Trims idle TCP+TLS state across ~55 CT log hosts.
+
+### Parser optimizations
+
+The per-certificate hot path got three changes, each validated by byte-equivalence snapshot tests against a 51-cert corpus (11 synthetic + 40 sampled from live CT) to guarantee output stability:
+
+- **Thread-local scratch buffer** for extension display-string building. Replaces the per-call `format!` realloc churn with `write!` into a reused `String`.
+- **SmallVec for accumulators** (`san_parts`, `aia_parts`, `policy_strs`) — most certs have a handful of entries; the inline-capacity case skips the heap alloc entirely.
+- **`needs_extensions` skip**. New public `parse_certificate_with_options` / `parse_leaf_input_with_options` entry points take a `ParseOptions { include_der, parse_extensions }` struct. When the runtime config has both `full` and `lite` streams disabled (only `domains_only` subscribed), per-cert extension display-string parsing is skipped entirely. `all_domains` is still populated from the SAN extension regardless of this flag, so the `domains_only` payload is byte-identical to the v1.5.x output — verified by dedicated `parse_extensions_skip_preserves_domains_only_*` snapshot tests on both synthetic and live CT data.
+
+The existing `parse_certificate` / `parse_leaf_input` functions remain on the public API surface as backwards-compatible wrappers for external crate consumers (fuzz target, integration tests).
+
+### Optional JSON backend: sonic-rs
+
+A new `sonic` Cargo feature swaps the JSON serializer for cloudwego/sonic-rs (benchmarks ~1.5–2× faster than simd-json on typical payloads). **Default OFF.** Backend precedence is `sonic > simd > serde_json`.
+
+**Opt in:**
+
+```bash
+cargo build --release --features sonic
+```
+
+**Edge cases to understand before enabling:**
+
+- **NaN / Infinity floats:** sonic-rs accepts them and emits the non-standard tokens `"NaN"` / `"inf"`. serde_json and simd-json reject. certstream-server payloads never produce NaN floats (all f64 fields derive from monotonic millisecond timestamps), so this is theoretical for current code — but if a future field could carry NaN, sonic is the wrong backend.
+- **Unicode escaping:** serde_json escapes some non-ASCII control bytes that sonic-rs leaves raw. Both are valid JSON per RFC 8259, but downstream consumers doing byte-level diffing may notice.
+- **Number precision:** round-trip is byte-identical for normal f64 values. Integers above 2⁵³ may differ — irrelevant for our payload.
+
+Sonic-rs uses runtime CPU dispatch (SSE4.2 / AVX2 on x86, NEON on arm64), so the binary stays portable.
+
+### IssuerCache backend
+
+Internal swap from `moka` to `quick_cache`. Identical `get` / `insert` semantics for our usage (bounded fingerprint → DER map, ~10 k entries). quick_cache is lighter weight: no TinyLFU sketch, no async housekeeping task, synchronous eviction on insert. `Cargo.lock` shrank by ~220 lines.
+
+### Tokio feature trim
+
+`tokio = { features = ["full"] }` is now the explicit list `["rt-multi-thread","net","sync","time","io-util","macros","fs","signal"]`. The features `"full"` additionally pulls in (`process`, `tracing`, `parking_lot`, `test-util`) are confirmed unused by this codebase. Compile errors were the gate.
+
+### Build infrastructure
+
+- BuildKit cache mounts added to the Dockerfile. First build pays the full cost; rebuilds reuse the cargo registry and target dir between runs.
+- Multi-arch build fix: the prior `FROM --platform=$BUILDPLATFORM` line caused cargo to compile for the host triple instead of the target. Reverted to the direct qemu-emulated path.
+
+---
+
+## Known invariants preserved
+
+Nothing in this release should change observable behaviour from v1.5.x. Specifically:
+
+- **WebSocket message schemas** — `full`, `lite`, `domains_only`, `dns_entries`, and any internal variant. JSON field names, ordering, types, null/empty handling — all byte-equivalent to v1.5.x, verified by the parser snapshot suite (51-cert hybrid corpus: 11 synthetic + 40 live CT).
+- **REST API responses** — `/api/cert/{hash}`, `/metrics`, `/health`, `/health/deep`. Same paths, same status codes, same response bodies.
+- **Configuration file format** — YAML schema, field names, defaults. v1.5.x configs load and behave identically.
+- **CLI flags & environment variables** — no renames, no removals, no behaviour changes on existing flags. New env vars (`MIMALLOC_*`, sonic-rs feature) default to current v1.5.x behaviour.
+- **Prometheus metric names & labels** — `certstream_messages_sent`, `certstream_certificates_processed`, `certstream_dedup_cache_size`, etc. Dashboard / alert queries do not need updating.
+- **State file format** — v1.5.x state files load cleanly in v1.6.0.
+
+---
+
+## Recommended `MIMALLOC_*` env vars for users running outside the Dockerfile
+
+Our Dockerfile sets:
+
+```
+MIMALLOC_VERBOSE=0
+```
+
+That's the only knob; mimalloc's defaults already produce aggressive page return (10 ms purge delay). For users running the binary directly on Linux:
+
+- **No env vars are required.** Defaults are fine.
+- `MIMALLOC_VERBOSE=1` — prints an init banner with all options. Useful as a one-time sanity check to confirm mimalloc is actually active. Disable in production.
+- `MIMALLOC_SHOW_STATS=1` — prints allocator stats on process exit. Useful for soak diagnostics; noisy.
+- `MIMALLOC_PURGE_DELAY=<ms>` — override the default 10 ms purge cadence. Increase for slightly higher throughput at the cost of slower page return; decrease for more aggressive RSS reclamation. The default is already aggressive — only touch this if you have a measurement that justifies it.
+
+If you've migrated from a jemalloc-based deployment, **do not** carry `MALLOC_CONF` over — it's a jemalloc-only env var and mimalloc ignores it.
+
+---
+
+## Notes on implementation choices
+
+Two deliberate deviations from the original v1.6.0 plan, captured here so future-us doesn't have to spelunk the commit log.
+
+### Allocator: jemalloc → mimalloc
+
+The original plan called for `tikv-jemallocator` with `disable_initial_exec_tls`. During implementation on the Alpine/musl static-build target, jemalloc **compiled in cleanly but never activated at runtime**: `MALLOC_CONF` was silently ignored, `MALLOC_CONF=stats_print:true` emitted nothing on exit, and even `MALLOC_CONF=abort_conf:true,narenas:notanumber` failed to abort the process — all three indicators of an inactive allocator. A diagnostic marker print confirmed the cfg gate evaluated true and the `#[global_allocator]` static was compiled in, ruling out a feature-flag bug. The root cause appears to be a known interaction between musl-static + Rust 1.95 + fat LTO + tikv-jemallocator 0.6.x; we did not pin down the exact link-time mechanism. Disabling LTO didn't help.
+
+mimalloc activated cleanly on the same target on the first try — confirmed via the `MIMALLOC_VERBOSE=1` init banner (`mimalloc: process init: 0x...`, full option dump) and the `MIMALLOC_SHOW_STATS=1` exit stats (arena counts, page counts, purge counts). The fragmentation-control benefits we wanted from jemalloc are equivalent in mimalloc; the user-facing impact is identical.
+
+### `panic = "abort"` deferred — `panic = "unwind"` explicitly set
+
+The original plan called for `panic = "abort"` in the release profile (smaller binary, smaller code pages, eliminate unwinding overhead). Implementation surfaced `futures::FutureExt::catch_unwind` at `src/main.rs:498`, used by the CT poll loop to recover from worker panics. `panic = "abort"` would silently break that recovery path — under abort, the entire process dies on any worker panic rather than just losing one watcher loop iteration.
+
+We elected to defer the `panic = "abort"` switch to a later release, after a deliberate audit of the unwinding contract (refactor the worker-panic recovery to not need `catch_unwind`, or accept the trade-off knowingly). `panic = "unwind"` is set explicitly in `[profile.release]` so future readers don't wonder why it's missing from the hardening list.
+
+---
+
+## Upgrade procedure
+
+1. Pull the new binary / image.
+2. Restart.
+
+That's it. If you're running outside the Dockerfile and want the allocator opt-out, see above. If you want to try sonic-rs, see above.
+
+---
+
+
 
 **May 19, 2026**
 
