@@ -1,3 +1,15 @@
+// mimalloc on Linux only. macOS / Windows / MSVC fall through to the system
+// allocator (the mimalloc dep is target-gated in Cargo.toml). Opt out on
+// Linux with `--no-default-features --features simd`.
+//
+// v1.6.0 originally planned tikv-jemallocator but it silently failed to
+// activate on Alpine/musl static builds — jemalloc compiled in but never
+// initialized at runtime (MALLOC_CONF was ignored, [heap] mapping persisted,
+// stats_print emitted nothing). mimalloc works cleanly on the same target.
+#[cfg(all(feature = "mimalloc", target_os = "linux"))]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 mod api;
 mod cli;
 mod config;

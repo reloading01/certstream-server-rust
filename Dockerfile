@@ -2,7 +2,7 @@
 FROM rust:1.95-alpine AS builder
 ARG TARGETPLATFORM
 
-RUN apk add --no-cache musl-dev pkgconf openssl-dev openssl-libs-static
+RUN apk add --no-cache musl-dev pkgconf openssl-dev openssl-libs-static make gcc
 
 WORKDIR /app
 COPY Cargo.toml Cargo.lock* ./
@@ -29,12 +29,11 @@ RUN apk add --no-cache ca-certificates curl
 
 COPY --from=builder /usr/local/bin/certstream-server-rust /usr/local/bin/
 
-# jemalloc tuning. No-op under musl's default allocator; activates once the
-# jemalloc feature ships in v1.6.0 PR2. Values follow database production
-# norms: background_thread returns pages asynchronously, dirty/muzzy decay
-# 5000ms (vs jemalloc default 10000ms) for an RSS-sensitive monitoring
-# service, narenas:4 caps per-arena retention on high-core hosts.
-ENV MALLOC_CONF=background_thread:true,dirty_decay_ms:5000,muzzy_decay_ms:5000,narenas:4
+# mimalloc tuning. Defaults are already aggressive about returning memory
+# to the OS (mi_option_purge_delay = 10ms), which is what we want for an
+# RSS-sensitive monitoring service. MIMALLOC_VERBOSE=0 suppresses init noise
+# on stderr; flip to 1 for diagnostics.
+ENV MIMALLOC_VERBOSE=0
 
 EXPOSE 8080
 
