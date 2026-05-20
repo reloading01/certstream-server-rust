@@ -27,7 +27,10 @@
 
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use certstream_server_rust::config::StreamConfig;
-use certstream_server_rust::ct::{parse_certificate, parse_leaf_input};
+use certstream_server_rust::ct::{
+    parse_certificate, parse_certificate_with_options, parse_leaf_input,
+    parse_leaf_input_with_options, ParseOptions,
+};
 use certstream_server_rust::models::{
     CertificateData, CertificateMessage, ChainCert, LeafCert, PreSerializedMessage, Source,
 };
@@ -256,6 +259,84 @@ fn snapshot_live_ct_corpus_matches() {
         "snapshot_live_ct_corpus_matches: {} fixtures verified",
         fixtures.len()
     );
+}
+
+/// §1.5a invariant: skipping extension display-string parsing must not change
+/// the `domains_only` output bytes for any corpus cert. The display strings
+/// are not emitted in the domains_only variant, so the only thing that could
+/// affect output is the `all_domains` list — and that's populated identically
+/// in both paths (the SAN loop always runs for DNS names regardless of the
+/// `parse_extensions` flag).
+#[test]
+fn parse_extensions_skip_preserves_domains_only_synthetic() {
+    let path = PathBuf::from(FIXTURE_DIR).join("synthetic.json");
+    let raw = std::fs::read_to_string(&path).expect("synthetic.json must exist");
+    let fixtures: Vec<SyntheticFixture> = serde_json::from_str(&raw).unwrap();
+    let opts_skip = ParseOptions {
+        include_der: true,
+        parse_extensions: false,
+    };
+    for f in &fixtures {
+        let der = B64.decode(&f.der_b64).expect("decode der_b64");
+        let leaf = parse_certificate_with_options(&der, opts_skip)
+            .unwrap_or_else(|| panic!("parse failed for {}", f.name));
+        let msg = build_msg(
+            leaf,
+            None,
+            Cow::Borrowed("X509LogEntry"),
+            f.submission_timestamp,
+            FIXED_CERT_INDEX,
+            FIXED_CERT_LINK.to_string(),
+            test_source(),
+        );
+        let (_, _, doms) = serialize_all(&msg);
+        assert_eq!(
+            doms, f.expected_domains_only,
+            "{}: domains_only diverged when parse_extensions=false",
+            f.name
+        );
+    }
+}
+
+#[test]
+fn parse_extensions_skip_preserves_domains_only_live_ct() {
+    let path = PathBuf::from(FIXTURE_DIR).join("live_ct.json");
+    let raw = std::fs::read_to_string(&path).expect("live_ct.json must exist");
+    let fixtures: Vec<LiveCtFixture> = serde_json::from_str(&raw).unwrap();
+    let opts_skip = ParseOptions {
+        include_der: true,
+        parse_extensions: false,
+    };
+    for f in &fixtures {
+        let parsed =
+            parse_leaf_input_with_options(&f.leaf_input, &f.extra_data, opts_skip).unwrap_or_else(
+                || panic!("parse_leaf_input_with_options None for {}", f.name),
+            );
+        let chain = parsed.parse_chain();
+        let source = Arc::new(Source {
+            name: Arc::from(f.log_name.as_str()),
+            url: Arc::from(f.log_url.as_str()),
+        });
+        let cert_link = format!(
+            "{}ct/v1/get-entries?start={}&end={}",
+            f.log_url, f.cert_index, f.cert_index
+        );
+        let msg = build_msg(
+            parsed.leaf_cert,
+            Some(chain),
+            parsed.update_type,
+            parsed.submission_timestamp,
+            f.cert_index,
+            cert_link,
+            source,
+        );
+        let (_, _, doms) = serialize_all(&msg);
+        assert_eq!(
+            doms, f.expected_domains_only,
+            "{}: domains_only diverged when parse_extensions=false",
+            f.name
+        );
+    }
 }
 
 // ----- synthetic corpus generator -----

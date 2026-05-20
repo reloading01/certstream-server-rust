@@ -2,7 +2,9 @@ use ahash::AHashSet;
 use base64::{engine::general_purpose::STANDARD, Engine};
 use sha1::Sha1;
 use sha2::{Digest, Sha256};
+use smallvec::SmallVec;
 use std::borrow::Cow;
+use std::cell::RefCell;
 use std::fmt::Write;
 use std::net::IpAddr;
 use std::sync::Arc;
@@ -53,17 +55,60 @@ pub struct ParsedEntry {
     /// dedup filter) never pay the cost of DER-parsing 2-4 chain certs.
     chain_extra_bytes: Vec<u8>,
     chain_offset: usize,
+    /// Inherited from `parse_leaf_input_with_options`: chain certs honour the
+    /// same `parse_extensions` choice as the leaf, so a domains_only-only
+    /// deployment skips chain extension parsing too.
+    parse_opts: ParseOptions,
 }
 
 impl ParsedEntry {
     /// Parse the certificate chain from the stored extra_data.
     /// Call this only after confirming the leaf cert passes dedup filtering.
     pub fn parse_chain(&self) -> Vec<ChainCert> {
-        parse_chain_from_bytes(&self.chain_extra_bytes, self.chain_offset)
+        parse_chain_from_bytes(&self.chain_extra_bytes, self.chain_offset, self.parse_opts)
     }
 }
 
+/// §1.5a: options controlling optional parser work. Construct via
+/// [`ParseOptions::default`] (matches the historical [`parse_certificate`]
+/// and [`parse_leaf_input`] behaviour) and tweak fields as needed.
+#[derive(Debug, Clone, Copy)]
+pub struct ParseOptions {
+    /// If true, populate `LeafCert::as_der` with the base64-encoded DER input.
+    /// Set false on chain certs (the runtime doesn't broadcast chain DERs).
+    pub include_der: bool,
+    /// If true, run the full extension-display-string pass (SAN, AIA, policy,
+    /// AKI, SKI, KU, EKU, BasicConstraints). Setting false leaves the
+    /// `Extensions` block defaulted — useful when only the `domains_only`
+    /// stream is subscribed since that variant doesn't emit `extensions`.
+    /// `all_domains` (which feeds the DNS list and the domains_only payload)
+    /// is still populated from the SAN extension regardless of this flag.
+    pub parse_extensions: bool,
+}
+
+impl Default for ParseOptions {
+    fn default() -> Self {
+        Self {
+            include_der: true,
+            parse_extensions: true,
+        }
+    }
+}
+
+/// Backwards-compat wrapper: equivalent to `parse_leaf_input_with_options`
+/// with `ParseOptions::default()`. Retained as part of the public lib surface
+/// for external integration tests and the fuzz harness — the bin's hot path
+/// uses `parse_leaf_input_with_options` directly to honour StreamConfig.
+#[allow(dead_code)]
 pub fn parse_leaf_input(leaf_input: &str, extra_data: &str) -> Option<ParsedEntry> {
+    parse_leaf_input_with_options(leaf_input, extra_data, ParseOptions::default())
+}
+
+pub fn parse_leaf_input_with_options(
+    leaf_input: &str,
+    extra_data: &str,
+    opts: ParseOptions,
+) -> Option<ParsedEntry> {
     let leaf_bytes = STANDARD.decode(leaf_input).ok()?;
     let extra_bytes = STANDARD.decode(extra_data).ok()?;
 
@@ -90,13 +135,18 @@ pub fn parse_leaf_input(leaf_input: &str, extra_data: &str) -> Option<ParsedEntr
     let entry_type = u16::from_be_bytes([leaf_bytes[10], leaf_bytes[11]]);
 
     match entry_type {
-        0 => parse_x509_entry(&leaf_bytes, extra_bytes, submission_timestamp),
-        1 => parse_precert_entry(extra_bytes, submission_timestamp),
+        0 => parse_x509_entry(&leaf_bytes, extra_bytes, submission_timestamp, opts),
+        1 => parse_precert_entry(extra_bytes, submission_timestamp, opts),
         _ => None,
     }
 }
 
-fn parse_x509_entry(leaf_bytes: &[u8], extra_bytes: Vec<u8>, submission_timestamp: f64) -> Option<ParsedEntry> {
+fn parse_x509_entry(
+    leaf_bytes: &[u8],
+    extra_bytes: Vec<u8>,
+    submission_timestamp: f64,
+    opts: ParseOptions,
+) -> Option<ParsedEntry> {
     if leaf_bytes.len() < 15 {
         return None;
     }
@@ -112,7 +162,7 @@ fn parse_x509_entry(leaf_bytes: &[u8], extra_bytes: Vec<u8>, submission_timestam
     }
 
     let cert_bytes = &cert_data[3..3 + cert_len];
-    let leaf_cert = parse_certificate(cert_bytes, true)?;
+    let leaf_cert = parse_certificate_with_options(cert_bytes, opts)?;
 
     Some(ParsedEntry {
         update_type: Cow::Borrowed("X509LogEntry"),
@@ -120,10 +170,15 @@ fn parse_x509_entry(leaf_bytes: &[u8], extra_bytes: Vec<u8>, submission_timestam
         submission_timestamp,
         chain_extra_bytes: extra_bytes,
         chain_offset: 0,
+        parse_opts: opts,
     })
 }
 
-fn parse_precert_entry(extra_bytes: Vec<u8>, submission_timestamp: f64) -> Option<ParsedEntry> {
+fn parse_precert_entry(
+    extra_bytes: Vec<u8>,
+    submission_timestamp: f64,
+    opts: ParseOptions,
+) -> Option<ParsedEntry> {
     // RFC 6962: extra_data for precert contains:
     // - 3 bytes: pre-certificate length
     // - pre-certificate (full X509 with CT poison extension)
@@ -141,7 +196,7 @@ fn parse_precert_entry(extra_bytes: Vec<u8>, submission_timestamp: f64) -> Optio
     }
 
     let precert_bytes = &extra_bytes[3..3 + precert_len];
-    let mut leaf_cert = parse_certificate(precert_bytes, true)?;
+    let mut leaf_cert = parse_certificate_with_options(precert_bytes, opts)?;
     leaf_cert.extensions.ctl_poison_byte = true;
 
     let chain_offset = 3 + precert_len;
@@ -152,10 +207,25 @@ fn parse_precert_entry(extra_bytes: Vec<u8>, submission_timestamp: f64) -> Optio
         submission_timestamp,
         chain_extra_bytes: extra_bytes,
         chain_offset,
+        parse_opts: opts,
     })
 }
 
+/// Backwards-compat wrapper: equivalent to `parse_certificate_with_options`
+/// with `parse_extensions: true` and the caller's `include_der`. See
+/// [`parse_leaf_input`] for the rationale on why this still exists.
+#[allow(dead_code)]
 pub fn parse_certificate(der_bytes: &[u8], include_der: bool) -> Option<LeafCert> {
+    parse_certificate_with_options(
+        der_bytes,
+        ParseOptions {
+            include_der,
+            parse_extensions: true,
+        },
+    )
+}
+
+pub fn parse_certificate_with_options(der_bytes: &[u8], opts: ParseOptions) -> Option<LeafCert> {
     let (_, cert) = X509Certificate::from_der(der_bytes).ok()?;
 
     let mut subject = extract_name(cert.subject());
@@ -188,9 +258,14 @@ pub fn parse_certificate(der_bytes: &[u8], include_der: bool) -> Option<LeafCert
         all_domains.push(cn.clone());
     }
 
-    let extensions = parse_extensions(&cert, &mut all_domains, &mut seen_domains);
+    let extensions = parse_extensions(
+        &cert,
+        &mut all_domains,
+        &mut seen_domains,
+        opts.parse_extensions,
+    );
 
-    let as_der = if include_der {
+    let as_der = if opts.include_der {
         Some(STANDARD.encode(der_bytes))
     } else {
         None
@@ -214,7 +289,7 @@ pub fn parse_certificate(der_bytes: &[u8], include_der: bool) -> Option<LeafCert
     })
 }
 
-fn parse_chain_from_bytes(bytes: &[u8], start_offset: usize) -> Vec<ChainCert> {
+fn parse_chain_from_bytes(bytes: &[u8], start_offset: usize, opts: ParseOptions) -> Vec<ChainCert> {
     let mut chain = Vec::with_capacity(4);
 
     if bytes.len() <= start_offset + 3 {
@@ -246,7 +321,14 @@ fn parse_chain_from_bytes(bytes: &[u8], start_offset: usize) -> Vec<ChainCert> {
         }
 
         let cert_bytes = &bytes[offset..offset + cert_len];
-        if let Some(leaf) = parse_certificate(cert_bytes, false) {
+        // Chain certs never include their DER in the broadcast payload, but
+        // honour the caller's parse_extensions choice for consistency with
+        // the leaf cert.
+        let chain_opts = ParseOptions {
+            include_der: false,
+            parse_extensions: opts.parse_extensions,
+        };
+        if let Some(leaf) = parse_certificate_with_options(cert_bytes, chain_opts) {
             chain.push(ChainCert {
                 subject: leaf.subject,
                 issuer: leaf.issuer,
@@ -304,19 +386,88 @@ fn extract_name(name: &X509Name) -> Subject {
     subject
 }
 
+// §1.5b: thread-local scratch buffer for extension display-string building.
+// `format!` on each SAN / AIA / policy entry was producing one fresh String
+// per call with the macro-internal Vec growth pattern. Reusing a per-thread
+// String + writing into it + cloning once at exact size eliminates the
+// realloc churn — the clone alloc remains (we still need a heap String to
+// push), but the buffer reuse avoids repeated mid-grow reallocs.
+thread_local! {
+    static EXT_SCRATCH: RefCell<String> = RefCell::new(String::with_capacity(128));
+}
+
+/// Push `format!(...)` output into `dest`, going through the thread-local
+/// scratch to avoid the format!-macro internal realloc churn. The final
+/// clone is unavoidable (dest stores owned Strings).
+#[inline]
+fn push_formatted<A: smallvec::Array<Item = String>>(
+    dest: &mut SmallVec<A>,
+    args: std::fmt::Arguments<'_>,
+) {
+    EXT_SCRATCH.with(|cell| {
+        let mut buf = cell.borrow_mut();
+        buf.clear();
+        // write! into a String is infallible.
+        let _ = std::fmt::Write::write_fmt(&mut *buf, args);
+        dest.push(buf.clone());
+    });
+}
+
 /// Issue #8: AHashSet<&str> — borrows &str from the parsed cert directly.
 /// On new SAN entry: one allocation (dns.to_string() into all_domains only).
 /// On duplicate: zero allocations (insert returns false, nothing pushed).
+///
+/// §1.5a: `with_display_strings` controls whether to build the display-only
+/// extension fields (subject_alt_name, AIA, policies, KU, EKU, AKI, SKI,
+/// basicConstraints, ctl_poison_byte). When false, only `all_domains` is
+/// populated from the SAN extension (still needed by the `domains_only`
+/// stream); every other extension is left at its default. Deployments with
+/// `full=false, lite=false, domains_only=true` therefore skip the bulk of
+/// the per-cert allocation churn.
 fn parse_extensions<'cert>(
     cert: &'cert X509Certificate,
     all_domains: &mut DomainList,
     seen_domains: &mut AHashSet<&'cert str>,
+    with_display_strings: bool,
 ) -> Extensions {
     let mut ext = Extensions::default();
-    let mut san_parts: Vec<String> = Vec::new();
+    // §1.5c: SmallVec with inline capacity for the common cases (most certs
+    // have a handful of SANs; AIA / policy lists are typically ≤2-3 entries).
+    // Spills to heap transparently for high-SAN certs.
+    let mut san_parts: SmallVec<[String; 4]> = SmallVec::new();
 
     for extension in cert.extensions() {
         match extension.parsed_extension() {
+            // SAN must always run (it feeds `all_domains` for domains_only).
+            // Display strings inside the loop are gated.
+            ParsedExtension::SubjectAlternativeName(san) => {
+                for name in &san.general_names {
+                    match name {
+                        GeneralName::DNSName(dns) => {
+                            // Issue #8: insert borrows &str directly — no allocation on hit.
+                            // Single dns.to_string() alloc only on new (non-duplicate) entry.
+                            if seen_domains.insert(*dns) {
+                                all_domains.push(dns.to_string());
+                            }
+                            if with_display_strings {
+                                push_formatted(&mut san_parts, format_args!("DNS:{}", dns));
+                            }
+                        }
+                        GeneralName::RFC822Name(email) if with_display_strings => {
+                            push_formatted(&mut san_parts, format_args!("email:{}", email));
+                        }
+                        GeneralName::IPAddress(ip_bytes) if with_display_strings => {
+                            if let Some(ip) = parse_ip_address(ip_bytes) {
+                                push_formatted(&mut san_parts, format_args!("IP Address:{}", ip));
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            // All remaining extension types are display-only — skip when
+            // the caller has signalled no display strings are needed.
+            _ if !with_display_strings => {}
             ParsedExtension::AuthorityKeyIdentifier(aki) => {
                 if let Some(key_id) = &aki.key_identifier {
                     ext.authority_key_identifier = Some(format_key_id(key_id.0));
@@ -339,34 +490,11 @@ fn parse_extensions<'cert>(
                 };
                 ext.basic_constraints = Some(ca_str);
             }
-            ParsedExtension::SubjectAlternativeName(san) => {
-                for name in &san.general_names {
-                    match name {
-                        GeneralName::DNSName(dns) => {
-                            san_parts.push(format!("DNS:{}", dns));
-                            // Issue #8: insert borrows &str directly — no allocation on hit.
-                            // Single dns.to_string() alloc only on new (non-duplicate) entry.
-                            if seen_domains.insert(*dns) {
-                                all_domains.push(dns.to_string());
-                            }
-                        }
-                        GeneralName::RFC822Name(email) => {
-                            san_parts.push(format!("email:{}", email));
-                        }
-                        GeneralName::IPAddress(ip_bytes) => {
-                            if let Some(ip) = parse_ip_address(ip_bytes) {
-                                san_parts.push(format!("IP Address:{}", ip));
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-            }
             ParsedExtension::AuthorityInfoAccess(aia) => {
-                let mut aia_parts: Vec<String> = Vec::new();
+                let mut aia_parts: SmallVec<[String; 2]> = SmallVec::new();
                 for desc in &aia.accessdescs {
                     if let GeneralName::URI(uri) = &desc.access_location {
-                        aia_parts.push(format!("URI:{}", uri));
+                        push_formatted(&mut aia_parts, format_args!("URI:{}", uri));
                     }
                 }
                 if !aia_parts.is_empty() {
@@ -374,9 +502,9 @@ fn parse_extensions<'cert>(
                 }
             }
             ParsedExtension::CertificatePolicies(policies) => {
-                let mut policy_strs: Vec<String> = Vec::new();
+                let mut policy_strs: SmallVec<[String; 2]> = SmallVec::new();
                 for policy in policies.iter() {
-                    policy_strs.push(format!("Policy: {}\n", policy.policy_id));
+                    push_formatted(&mut policy_strs, format_args!("Policy: {}\n", policy.policy_id));
                 }
                 if !policy_strs.is_empty() {
                     ext.certificate_policies = Some(policy_strs.concat());
@@ -391,7 +519,7 @@ fn parse_extensions<'cert>(
         }
     }
 
-    if !san_parts.is_empty() {
+    if with_display_strings && !san_parts.is_empty() {
         ext.subject_alt_name = Some(san_parts.join(", "));
     }
 
@@ -882,14 +1010,14 @@ mod tests {
 
     #[test]
     fn test_parse_chain_from_bytes_empty() {
-        let chain = parse_chain_from_bytes(&[], 0);
+        let chain = parse_chain_from_bytes(&[], 0, ParseOptions::default());
         assert!(chain.is_empty());
     }
 
     #[test]
     fn test_parse_chain_from_bytes_too_short() {
         // Only 3 bytes (the chain-length prefix) with zero length, no certs
-        let chain = parse_chain_from_bytes(&[0, 0, 0], 0);
+        let chain = parse_chain_from_bytes(&[0, 0, 0], 0, ParseOptions::default());
         assert!(chain.is_empty());
     }
 
@@ -912,7 +1040,7 @@ mod tests {
         // cert DER bytes
         extra.extend_from_slice(&cert_der);
 
-        let chain = parse_chain_from_bytes(&extra, 0);
+        let chain = parse_chain_from_bytes(&extra, 0, ParseOptions::default());
         assert_eq!(chain.len(), 1, "should parse exactly one chain cert");
         assert_eq!(chain[0].subject.cn.as_deref(), Some("chain-test.com"));
     }

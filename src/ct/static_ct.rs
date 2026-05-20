@@ -9,7 +9,10 @@ use std::time::Duration;
 use tracing::{debug, error, info, warn};
 
 use super::watcher::LogHealth;
-use super::{broadcast_cert, build_cached_cert, parse_certificate, CtLog, WatcherContext};
+use super::{
+    broadcast_cert, build_cached_cert, parse_certificate_with_options, CtLog, ParseOptions,
+    WatcherContext,
+};
 use crate::models::{CertificateData, CertificateMessage, ChainCert, Source};
 
 /// A parsed static CT checkpoint.
@@ -510,6 +513,17 @@ pub async fn run_static_ct_watcher(log: CtLog, ctx: WatcherContext) {
     let counter_entries_parsed = metrics::counter!("certstream_static_ct_entries_parsed", "log" => log_name.clone());
     let counter_messages = metrics::counter!("certstream_messages_sent", "log" => log_name.clone());
 
+    // §1.5a: skip extension display-string parsing when neither full nor lite
+    // is subscribed at the config level. all_domains still populates from SAN.
+    let leaf_parse_opts = ParseOptions {
+        include_der: true,
+        parse_extensions: streams.full || streams.lite,
+    };
+    let issuer_parse_opts = ParseOptions {
+        include_der: false,
+        parse_extensions: streams.full || streams.lite,
+    };
+
     info!(log = %log_name, url = %base_url, "starting static CT watcher");
 
     let checkpoint_url = format!("{}/checkpoint", base_url);
@@ -836,7 +850,7 @@ pub async fn run_static_ct_watcher(log: CtLog, ctx: WatcherContext) {
                                     .increment(1);
                                 }
 
-                                let parsed = match parse_certificate(&leaf.cert_der, true) {
+                                let parsed = match parse_certificate_with_options(&leaf.cert_der, leaf_parse_opts) {
                                     Some(p) => p,
                                     None => {
                                         debug!(log = %log_name, index = cert_index, "skipped unparseable cert (static CT)");
@@ -859,7 +873,7 @@ pub async fn run_static_ct_watcher(log: CtLog, ctx: WatcherContext) {
                                     // pre-warm failed for this fp, we skip rather than
                                     // re-issuing a serial network round-trip on the hot path.
                                     if let Some(issuer_der) = issuer_cache.get(fp)
-                                        && let Some(issuer_cert) = parse_certificate(&issuer_der, false)
+                                        && let Some(issuer_cert) = parse_certificate_with_options(&issuer_der, issuer_parse_opts)
                                     {
                                         chain.push(ChainCert {
                                             subject: issuer_cert.subject,

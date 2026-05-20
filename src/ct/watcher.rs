@@ -5,7 +5,10 @@ use std::time::{Duration, Instant};
 
 use tracing::{debug, error, info, warn};
 
-use super::{broadcast_cert, build_cached_cert, parse_leaf_input, CtLog, WatcherContext};
+use super::{
+    broadcast_cert, build_cached_cert, parse_leaf_input_with_options, CtLog, ParseOptions,
+    WatcherContext,
+};
 use crate::models::{CertificateData, CertificateMessage, Source};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -277,6 +280,15 @@ pub async fn run_watcher_with_cache(log: CtLog, ctx: WatcherContext) {
     let counter_messages = metrics::counter!("certstream_messages_sent", "log" => log_name.clone());
     let counter_parse_failures = metrics::counter!("certstream_parse_failures", "log" => log_name.clone());
 
+    // §1.5a: extension display strings are only consumed by the `full` and
+    // `lite` streams; `domains_only` doesn't include them. When neither is
+    // subscribed at the config level, skip the per-cert extension-string
+    // work entirely (still populate all_domains for the DNS list).
+    let parse_opts = ParseOptions {
+        include_der: true,
+        parse_extensions: streams.full || streams.lite,
+    };
+
     info!(log = %log_name, url = %base_url, "starting watcher");
 
     // P1 fix: RFC6962 tree_size rollback guard, parallel to static_ct.rs's
@@ -499,7 +511,7 @@ pub async fn run_watcher_with_cache(log: CtLog, ctx: WatcherContext) {
                             let cert_index = current_index + i as u64;
                             max_index_seen = max_index_seen.max(cert_index);
                             let parsed =
-                                match parse_leaf_input(&entry.leaf_input, &entry.extra_data) {
+                                match parse_leaf_input_with_options(&entry.leaf_input, &entry.extra_data, parse_opts) {
                                     Some(p) => p,
                                     None => {
                                         debug!(log = %log_name, index = cert_index, "skipped unparseable cert");
