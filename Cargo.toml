@@ -46,7 +46,7 @@ mimalloc = ["dep:mimalloc"]
 sonic = ["dep:sonic-rs"]
 
 [dependencies]
-tokio = { version = "1.52", features = ["full"] }
+tokio = { version = "1.52", features = ["rt-multi-thread", "net", "sync", "time", "io-util", "macros", "fs", "signal"] }
 axum = { version = "0.8", features = ["ws"] }
 axum-server = { version = "0.8", features = ["tls-rustls"] }
 tower = { version = "0.5", features = ["util"] }
