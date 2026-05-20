@@ -1,5 +1,5 @@
 use bytes::Bytes;
-use moka::sync::Cache;
+use quick_cache::sync::Cache;
 use flate2::read::GzDecoder;
 use reqwest::Client;
 use std::borrow::Cow;
@@ -78,11 +78,13 @@ fn parse_leaf_index_ext(ext_bytes: &[u8]) -> Option<u64> {
     None
 }
 
-const MAX_ISSUER_CACHE_SIZE: u64 = 10_000;
+const MAX_ISSUER_CACHE_SIZE: usize = 10_000;
 
-/// Concurrent LRU cache backed by `moka` — automatically evicts the least-recently-used
-/// entry once `MAX_ISSUER_CACHE_SIZE` is reached, replacing the old DashMap that silently
-/// dropped inserts when full.
+/// Concurrent bounded cache for chain-issuer DER blobs. Switched from `moka`
+/// to `quick_cache` in v1.6.0: identical get/insert semantics for our use
+/// case (bounded fingerprint → DER map), but ~100B/entry less overhead and
+/// no async housekeeping task — eviction is synchronous on insert, so
+/// `len()` is accurate without a `run_pending_tasks` round-trip.
 pub struct IssuerCache {
     cache: Cache<[u8; 32], Bytes>,
 }
@@ -90,9 +92,7 @@ pub struct IssuerCache {
 impl IssuerCache {
     pub fn new() -> Self {
         Self {
-            cache: Cache::builder()
-                .max_capacity(MAX_ISSUER_CACHE_SIZE)
-                .build(),
+            cache: Cache::new(MAX_ISSUER_CACHE_SIZE),
         }
     }
 
@@ -110,8 +110,7 @@ impl IssuerCache {
     }
 
     pub fn len(&self) -> usize {
-        self.cache.run_pending_tasks();
-        self.cache.entry_count() as usize
+        self.cache.len()
     }
 }
 
