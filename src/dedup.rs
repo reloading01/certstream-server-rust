@@ -18,7 +18,11 @@ const DEFAULT_CAPACITY: usize = 200_000;
 /// (a few minutes) plus headroom for slower static-ct shards. Configurable via
 /// `dedup.ttl_secs` in YAML or `CERTSTREAM_DEDUP_TTL_SECS`.
 const DEFAULT_TTL_SECS: u64 = 900;
-const DEFAULT_CLEANUP_INTERVAL_SECS: u64 = 60;
+// 15s (down from 60s in v1.5.x) — at typical ingest rates the 60s cycle
+// could let the map grow ~60k entries above steady state between sweeps,
+// producing a sawtooth RSS curve. 15s flattens the curve and gives the
+// allocator a chance to release pages sooner.
+const DEFAULT_CLEANUP_INTERVAL_SECS: u64 = 15;
 
 /// Issue #1: Use raw [u8; 32] SHA-256 bytes as the key — fixed-size, stack-allocated,
 /// trivially hashable. Eliminates one heap allocation per certificate on every lookup.

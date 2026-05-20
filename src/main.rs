@@ -148,8 +148,8 @@ async fn main() {
         // hot TCP sockets, ~40-55 MiB of kernel + TLS state per process.
         // CT log polls are sequential per watcher (rate-limited at the
         // OperatorLimiter); 4 idle per host is enough for retry overlap.
-        .pool_max_idle_per_host(4)
-        .pool_idle_timeout(Duration::from_secs(60))
+        .pool_max_idle_per_host(2)
+        .pool_idle_timeout(Duration::from_secs(30))
         .tcp_nodelay(true)
         .build()
         .expect("failed to build http client");
@@ -643,6 +643,7 @@ fn build_router(protocols: &config::ProtocolConfig, config: &Config, deps: Route
     let protected_app = if config.rate_limit.enabled {
         info!("rate limiting enabled (token bucket + sliding window)");
         let limiter = rate_limiter.clone();
+        let conn_limiter = connection_limiter.clone();
         let rate_limit_cancel = shutdown_token.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(300));
@@ -651,6 +652,12 @@ fn build_router(protocols: &config::ProtocolConfig, config: &Config, deps: Route
                     _ = rate_limit_cancel.cancelled() => break,
                     _ = interval.tick() => {
                         limiter.cleanup_stale(Duration::from_secs(600));
+                        // ConnectionLimiter zombie sweep — see middleware.rs.
+                        // Coupled to rate_limit.enabled because we share the
+                        // tick; if rate_limit is off the sweep doesn't run,
+                        // which is still strictly better than v1.5.x (no sweep
+                        // at all). Decoupling is a follow-up.
+                        conn_limiter.cleanup_stale();
                     }
                 }
             }

@@ -121,6 +121,15 @@ impl ConnectionLimiter {
     pub fn current_connections(&self) -> u32 {
         self.total_connections.load(Ordering::Relaxed)
     }
+
+    /// Sweep zero-count entries from `per_ip_connections`. `release()` already
+    /// removes entries inline when their count hits zero, but error paths can
+    /// leave zombies (entry decremented to zero by saturating_sub without the
+    /// follow-up remove). This is a belt-and-braces sweep — cheap, idempotent,
+    /// safe to run when the limiter is disabled.
+    pub fn cleanup_stale(&self) {
+        self.per_ip_connections.retain(|_, count| *count > 0);
+    }
 }
 
 /// Constant-time check that `target` matches some element of `list`.
