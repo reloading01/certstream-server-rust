@@ -19,6 +19,31 @@ simd = ["simd-json"]
 # allocations still went through musl malloc). mimalloc activates cleanly on
 # the same target and gives equivalent fragmentation-control benefits.
 mimalloc = ["dep:mimalloc"]
+# `sonic` swaps the JSON serializer for cloudwego/sonic-rs. Benchmarks have
+# it ~1.5-2× faster than simd-json on typical payloads. Default OFF because
+# the behaviour around a handful of edge cases differs subtly from
+# serde_json / simd-json:
+#
+#   * NaN / Infinity floats: serde_json and simd-json reject by default;
+#     sonic-rs accepts and emits the non-standard tokens "NaN"/"inf".
+#     certstream-server payloads never produce NaN floats (all f64 fields
+#     are derived from monotonic millisecond timestamps), but if a future
+#     field could contain NaN, that's the failure mode to watch for.
+#
+#   * Number precision: round-trip for normal f64 values is byte-identical
+#     to serde_json. Denormals and very-large integers above 2^53 may
+#     stringify slightly differently — irrelevant for our payload.
+#
+#   * Unicode escaping: serde_json escapes some non-ASCII control bytes
+#     that sonic-rs leaves raw. Both are valid JSON per RFC 8259, but
+#     downstream consumers doing byte-level diffing may notice.
+#
+# Sonic-rs uses runtime CPU-feature dispatch (SSE4.2 / AVX2 on x86,
+# NEON on arm64) so the binary stays portable.
+#
+# Opt in with `--features sonic`. If both `simd` and `sonic` are enabled,
+# sonic-rs takes precedence (newer + generally faster).
+sonic = ["dep:sonic-rs"]
 
 [dependencies]
 tokio = { version = "1.52", features = ["full"] }
@@ -30,6 +55,7 @@ reqwest = { version = "0.13", features = ["json", "gzip", "brotli", "deflate"] }
 serde = { version = "1.0", features = ["derive", "rc"] }
 serde_json = "1.0"
 simd-json = { version = "0.17", optional = true }
+sonic-rs = { version = "0.5", optional = true }
 serde_yaml = "0.9"
 x509-parser = "0.18"
 base64 = "0.22"

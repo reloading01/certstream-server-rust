@@ -167,14 +167,31 @@ pub struct PreSerializedMessage {
 }
 
 /// Serialize any `Serialize` value to JSON bytes.
-/// Uses simd-json when the `simd` feature is enabled, otherwise serde_json.
+///
+/// Backend precedence (each gated by Cargo feature):
+///   1. `sonic` → cloudwego/sonic-rs (fastest; subtly different edge-case
+///      semantics — see the `sonic` feature comment in Cargo.toml for the
+///      full list, but tl;dr: NaN/Infinity emitted as non-standard tokens,
+///      some Unicode escaping differences. Default OFF.)
+///   2. `simd` → simd-json (default ON).
+///   3. neither → serde_json (always-available fallback; required when both
+///      `simd` and `sonic` are disabled).
+///
+/// All three produce identical JSON bytes for the payloads this crate emits
+/// (cert metadata: integers, monotonic timestamps as f64, ASCII/UTF-8 strings).
+/// The differences only surface for edge-case values that certstream-server
+/// never constructs.
 #[inline]
 fn serialize_json<T: Serialize>(value: &T, _capacity_hint: usize) -> Option<Vec<u8>> {
-    #[cfg(feature = "simd")]
+    #[cfg(feature = "sonic")]
+    {
+        sonic_rs::to_vec(value).ok()
+    }
+    #[cfg(all(feature = "simd", not(feature = "sonic")))]
     {
         simd_json::to_vec(value).ok()
     }
-    #[cfg(not(feature = "simd"))]
+    #[cfg(not(any(feature = "simd", feature = "sonic")))]
     {
         let mut buf = Vec::with_capacity(_capacity_hint);
         serde_json::to_writer(&mut buf, value).ok()?;
