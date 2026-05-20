@@ -56,6 +56,9 @@ struct RawTiledLog {
     state: Option<LogState>,
 }
 
+/// Mirror of the v3 log-list `state` object. Prod code only branches on
+/// `rejected`/`retired`; `usable` and `readonly` are declared so serde tolerates
+/// the full schema and tests can assert against them.
 #[derive(Debug, Clone, Deserialize)]
 #[allow(dead_code)]
 struct LogState {
@@ -82,7 +85,6 @@ pub enum LogType {
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct CtLog {
     pub description: String,
     pub url: String,

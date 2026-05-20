@@ -1,6 +1,6 @@
 [package]
 name = "certstream-server-rust"
-version = "1.4.0"
+version = "1.5.0"
 edition = "2024"
 repository = "https://github.com/reloading01/certstream-server-rust"
 license = "MIT"
@@ -11,46 +11,46 @@ default = ["simd"]
 simd = ["simd-json"]
 
 [dependencies]
-tokio = { version = "1.48", features = ["full"] }
+tokio = { version = "1.52", features = ["full"] }
 axum = { version = "0.8", features = ["ws"] }
-axum-server = { version = "0.7", features = ["tls-rustls"] }
+axum-server = { version = "0.8", features = ["tls-rustls"] }
 tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.6", features = ["cors"] }
-reqwest = { version = "0.12", features = ["json", "gzip", "brotli", "deflate"] }
+reqwest = { version = "0.13", features = ["json", "gzip", "brotli", "deflate"] }
 serde = { version = "1.0", features = ["derive", "rc"] }
 serde_json = "1.0"
-simd-json = { version = "0.14", optional = true }
+simd-json = { version = "0.17", optional = true }
 serde_yaml = "0.9"
-x509-parser = "0.16"
+x509-parser = "0.18"
 base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 futures-util = "0.3"
 metrics = "0.24"
-metrics-exporter-prometheus = "0.16"
+metrics-exporter-prometheus = "0.18"
 thiserror = "2"
-sha1 = "0.10"
-sha2 = "0.10"
-bytes = "1.10"
+sha1 = "0.11"
+sha2 = "0.11"
+bytes = "1.11"
 parking_lot = "0.12"
 smallvec = { version = "1.15", features = ["serde"] }
-regex = "1.11"
-memchr = "2.7"
+regex = "1.12"
+memchr = "2.8"
 tokio-stream = { version = "0.1", features = ["sync"] }
 backon = "1"
 dashmap = "6"
 ahash = "0.8"
-notify = { version = "7", features = ["macos_kqueue"] }
+notify = { version = "8", features = ["macos_kqueue"] }
 subtle = "2.6"
-arc-swap = "1.7"
+arc-swap = "1.9"
 tokio-util = { version = "0.7.18", features = ["full"] }
-futures = "0.3.31"
-flate2 = "1.0"
+futures = "0.3.32"
+flate2 = "1.1"
 moka = { version = "0.12", features = ["sync"] }
 
 [dev-dependencies]
-rcgen = "0.13"
+rcgen = "0.14"
 
 [profile.release]
 lto = true
@@ -60,3 +60,4 @@ opt-level = 3
 
 [profile.release.build-override]
 opt-level = 3
+

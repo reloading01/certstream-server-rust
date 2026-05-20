@@ -221,15 +221,27 @@ fn parse_chain_from_bytes(bytes: &[u8], start_offset: usize) -> Vec<ChainCert> {
         return chain;
     }
 
-    // Skip the 3-byte chain length prefix
+    // RFC 6962 §3.1 `Certificate certificate_chain<0..2^24-1>`:
+    // the 3-byte prefix is the BYTE length of the chain blob. Pre-1.5.0 we
+    // ignored it and ran until `bytes.len()`, which let a server pad the
+    // `extra_data` field with extra cert structures past the declared
+    // boundary — those would be parsed and surfaced as part of the chain.
+    // Enforce the declared end now.
+    let chain_byte_len = u32::from_be_bytes([
+        0,
+        bytes[start_offset],
+        bytes[start_offset + 1],
+        bytes[start_offset + 2],
+    ]) as usize;
     let mut offset = start_offset + 3;
+    let chain_end = offset.saturating_add(chain_byte_len).min(bytes.len());
 
-    while offset + 3 < bytes.len() {
+    while offset + 3 < chain_end {
         let cert_len =
             u32::from_be_bytes([0, bytes[offset], bytes[offset + 1], bytes[offset + 2]]) as usize;
         offset += 3;
 
-        if offset + cert_len > bytes.len() {
+        if offset + cert_len > chain_end {
             break;
         }
 

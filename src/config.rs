@@ -4,6 +4,36 @@ use std::fs;
 use std::net::IpAddr;
 use std::path::Path;
 
+/// `env_override!(target, "ENV_NAME")` reads the named env var, parses it,
+/// and assigns on success — leaving `target` untouched on missing var or
+/// parse failure. Replaces ~3 lines of boilerplate per field with one line
+/// while preserving the exact "ignore garbage env values" semantics of the
+/// hand-rolled code.
+macro_rules! env_override {
+    ($field:expr, $env:literal) => {
+        if let Ok(v) = std::env::var($env)
+            && let Ok(parsed) = v.parse()
+        {
+            $field = parsed;
+        }
+    };
+    ($field:expr, $env:literal, str) => {
+        if let Ok(v) = std::env::var($env) {
+            $field = v;
+        }
+    };
+    ($field:expr, $env:literal, some_str) => {
+        if let Ok(v) = std::env::var($env) {
+            $field = Some(v);
+        }
+    };
+    ($field:expr, $env:literal, ok_opt) => {
+        if let Ok(v) = std::env::var($env) {
+            $field = v.parse().ok();
+        }
+    };
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct CustomCtLog {
     pub name: String,
@@ -159,28 +189,19 @@ fn default_max_connections() -> u32 {
     10000
 }
 
+/// Per-IP rate limit. Single tier — no premium/standard split. Auth and
+/// rate-limit are independent concerns: auth gates *who* can talk to the
+/// server, rate limit gates *how often* per source IP.
 #[derive(Debug, Clone, Deserialize)]
 pub struct RateLimitConfig {
     #[serde(default)]
     pub enabled: bool,
-    #[serde(default = "default_free_max_tokens")]
-    pub free_max_tokens: f64,
-    #[serde(default = "default_free_refill_rate")]
-    pub free_refill_rate: f64,
-    #[serde(default = "default_free_burst")]
-    pub free_burst: f64,
-    #[serde(default = "default_standard_max_tokens")]
-    pub standard_max_tokens: f64,
-    #[serde(default = "default_standard_refill_rate")]
-    pub standard_refill_rate: f64,
-    #[serde(default = "default_standard_burst")]
-    pub standard_burst: f64,
-    #[serde(default = "default_premium_max_tokens")]
-    pub premium_max_tokens: f64,
-    #[serde(default = "default_premium_refill_rate")]
-    pub premium_refill_rate: f64,
-    #[serde(default = "default_premium_burst")]
-    pub premium_burst: f64,
+    #[serde(default = "default_max_tokens", alias = "free_max_tokens")]
+    pub max_tokens: f64,
+    #[serde(default = "default_refill_rate", alias = "free_refill_rate")]
+    pub refill_rate: f64,
+    #[serde(default = "default_burst", alias = "free_burst")]
+    pub burst: f64,
     #[serde(default = "default_window_seconds")]
     pub window_seconds: u64,
     #[serde(default = "default_window_max_requests")]
@@ -193,15 +214,9 @@ impl Default for RateLimitConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            free_max_tokens: default_free_max_tokens(),
-            free_refill_rate: default_free_refill_rate(),
-            free_burst: default_free_burst(),
-            standard_max_tokens: default_standard_max_tokens(),
-            standard_refill_rate: default_standard_refill_rate(),
-            standard_burst: default_standard_burst(),
-            premium_max_tokens: default_premium_max_tokens(),
-            premium_refill_rate: default_premium_refill_rate(),
-            premium_burst: default_premium_burst(),
+            max_tokens: default_max_tokens(),
+            refill_rate: default_refill_rate(),
+            burst: default_burst(),
             window_seconds: default_window_seconds(),
             window_max_requests: default_window_max_requests(),
             burst_window_seconds: default_burst_window_seconds(),
@@ -209,32 +224,14 @@ impl Default for RateLimitConfig {
     }
 }
 
-fn default_free_max_tokens() -> f64 {
+fn default_max_tokens() -> f64 {
     100.0
 }
-fn default_free_refill_rate() -> f64 {
+fn default_refill_rate() -> f64 {
     10.0
 }
-fn default_free_burst() -> f64 {
+fn default_burst() -> f64 {
     20.0
-}
-fn default_standard_max_tokens() -> f64 {
-    500.0
-}
-fn default_standard_refill_rate() -> f64 {
-    50.0
-}
-fn default_standard_burst() -> f64 {
-    100.0
-}
-fn default_premium_max_tokens() -> f64 {
-    2000.0
-}
-fn default_premium_refill_rate() -> f64 {
-    200.0
-}
-fn default_premium_burst() -> f64 {
-    500.0
 }
 fn default_window_seconds() -> u64 {
     60
@@ -264,7 +261,11 @@ impl Default for DedupConfig {
 }
 
 fn default_dedup_capacity() -> usize {
-    1_000_000
+    // Reset from 1M (v1.4) to 200K in 1.5.0 after the memory audit.
+    // See dedup.rs::DEFAULT_CAPACITY for the rationale; in short, the
+    // 1M cap cost ~38 MiB of resident memory for a window that the
+    // working set never needed.
+    200_000
 }
 fn default_dedup_ttl_secs() -> u64 {
     900
@@ -285,9 +286,17 @@ impl Default for ApiConfig {
 }
 
 fn default_cache_capacity() -> usize {
-    10000
+    // Dropped from 10K to 1K in 1.5.0. The /api/cert/{hash} endpoint is a
+    // niche operator lookup, not a hot path — 10K cache entries at ~1.5 KB
+    // each is ~15 MiB of memory mostly serving requests that never come.
+    // Operators with heavier REST traffic can bump via `CERTSTREAM_API_*`
+    // / YAML `api.cache_capacity`.
+    1_000
 }
 
+/// Bearer-token auth. Single flat token list — no premium/standard tiering.
+/// Rate limiting is enforced separately, per source IP, and does not look at
+/// the bearer at all.
 #[derive(Debug, Clone, Deserialize)]
 pub struct AuthConfig {
     #[serde(default)]
@@ -296,10 +305,6 @@ pub struct AuthConfig {
     pub tokens: Vec<String>,
     #[serde(default = "default_header_name")]
     pub header_name: String,
-    #[serde(default)]
-    pub standard_tokens: Vec<String>,
-    #[serde(default)]
-    pub premium_tokens: Vec<String>,
 }
 
 impl Default for AuthConfig {
@@ -308,8 +313,6 @@ impl Default for AuthConfig {
             enabled: false,
             tokens: Vec::new(),
             header_name: default_header_name(),
-            standard_tokens: Vec::new(),
-            premium_tokens: Vec::new(),
         }
     }
 }
@@ -483,118 +486,57 @@ impl Config {
         let tls_key = env::var("CERTSTREAM_TLS_KEY").ok().or(yaml_config.tls_key);
 
         let mut protocols = yaml_config.protocols.unwrap_or_default();
-        if let Ok(v) = env::var("CERTSTREAM_WS_ENABLED") {
-            protocols.websocket = v.parse().unwrap_or(protocols.websocket);
-        }
-        if let Ok(v) = env::var("CERTSTREAM_SSE_ENABLED") {
-            protocols.sse = v.parse().unwrap_or(protocols.sse);
-        }
-        if let Ok(v) = env::var("CERTSTREAM_METRICS_ENABLED") {
-            protocols.metrics = v.parse().unwrap_or(protocols.metrics);
-        }
-        if let Ok(v) = env::var("CERTSTREAM_HEALTH_ENABLED") {
-            protocols.health = v.parse().unwrap_or(protocols.health);
-        }
-        if let Ok(v) = env::var("CERTSTREAM_EXAMPLE_JSON_ENABLED") {
-            protocols.example_json = v.parse().unwrap_or(protocols.example_json);
-        }
-        if let Ok(v) = env::var("CERTSTREAM_API_ENABLED") {
-            protocols.api = v.parse().unwrap_or(protocols.api);
-        }
+        env_override!(protocols.websocket, "CERTSTREAM_WS_ENABLED");
+        env_override!(protocols.sse, "CERTSTREAM_SSE_ENABLED");
+        env_override!(protocols.metrics, "CERTSTREAM_METRICS_ENABLED");
+        env_override!(protocols.health, "CERTSTREAM_HEALTH_ENABLED");
+        env_override!(protocols.example_json, "CERTSTREAM_EXAMPLE_JSON_ENABLED");
+        env_override!(protocols.api, "CERTSTREAM_API_ENABLED");
 
         let mut ct_log = yaml_config.ct_log.unwrap_or_default();
-        if let Ok(v) = env::var("CERTSTREAM_CT_LOG_RETRY_MAX_ATTEMPTS") {
-            ct_log.retry_max_attempts = v.parse().unwrap_or(ct_log.retry_max_attempts);
-        }
-        if let Ok(v) = env::var("CERTSTREAM_CT_LOG_RETRY_INITIAL_DELAY_MS") {
-            ct_log.retry_initial_delay_ms = v.parse().unwrap_or(ct_log.retry_initial_delay_ms);
-        }
-        if let Ok(v) = env::var("CERTSTREAM_CT_LOG_RETRY_MAX_DELAY_MS") {
-            ct_log.retry_max_delay_ms = v.parse().unwrap_or(ct_log.retry_max_delay_ms);
-        }
-        if let Ok(v) = env::var("CERTSTREAM_CT_LOG_REQUEST_TIMEOUT_SECS") {
-            ct_log.request_timeout_secs = v.parse().unwrap_or(ct_log.request_timeout_secs);
-        }
-        if let Ok(v) = env::var("CERTSTREAM_CT_LOG_UNHEALTHY_THRESHOLD") {
-            ct_log.unhealthy_threshold = v.parse().unwrap_or(ct_log.unhealthy_threshold);
-        }
-        if let Ok(v) = env::var("CERTSTREAM_CT_LOG_HEALTHY_THRESHOLD") {
-            ct_log.healthy_threshold = v.parse().unwrap_or(ct_log.healthy_threshold);
-        }
-        if let Ok(v) = env::var("CERTSTREAM_CT_LOG_HEALTH_CHECK_INTERVAL_SECS") {
-            ct_log.health_check_interval_secs = v.parse().unwrap_or(ct_log.health_check_interval_secs);
-        }
-        if let Ok(v) = env::var("CERTSTREAM_CT_LOG_STATE_FILE") {
-            ct_log.state_file = Some(v);
-        }
-        if let Ok(v) = env::var("CERTSTREAM_CT_LOG_BATCH_SIZE") {
-            ct_log.batch_size = v.parse().unwrap_or(ct_log.batch_size);
-        }
-        if let Ok(v) = env::var("CERTSTREAM_CT_LOG_POLL_INTERVAL_MS") {
-            ct_log.poll_interval_ms = v.parse().unwrap_or(ct_log.poll_interval_ms);
-        }
-        if let Ok(v) = env::var("CERTSTREAM_RFC6962_ENABLED") {
-            ct_log.rfc6962_enabled = v.parse().unwrap_or(ct_log.rfc6962_enabled);
-        }
-        if let Ok(v) = env::var("CERTSTREAM_STATIC_CT_ENABLED") {
-            ct_log.static_ct_enabled = v.parse().unwrap_or(ct_log.static_ct_enabled);
-        }
+        env_override!(ct_log.retry_max_attempts, "CERTSTREAM_CT_LOG_RETRY_MAX_ATTEMPTS");
+        env_override!(ct_log.retry_initial_delay_ms, "CERTSTREAM_CT_LOG_RETRY_INITIAL_DELAY_MS");
+        env_override!(ct_log.retry_max_delay_ms, "CERTSTREAM_CT_LOG_RETRY_MAX_DELAY_MS");
+        env_override!(ct_log.request_timeout_secs, "CERTSTREAM_CT_LOG_REQUEST_TIMEOUT_SECS");
+        env_override!(ct_log.unhealthy_threshold, "CERTSTREAM_CT_LOG_UNHEALTHY_THRESHOLD");
+        env_override!(ct_log.healthy_threshold, "CERTSTREAM_CT_LOG_HEALTHY_THRESHOLD");
+        env_override!(ct_log.health_check_interval_secs, "CERTSTREAM_CT_LOG_HEALTH_CHECK_INTERVAL_SECS");
+        env_override!(ct_log.state_file, "CERTSTREAM_CT_LOG_STATE_FILE", some_str);
+        env_override!(ct_log.batch_size, "CERTSTREAM_CT_LOG_BATCH_SIZE");
+        env_override!(ct_log.poll_interval_ms, "CERTSTREAM_CT_LOG_POLL_INTERVAL_MS");
+        env_override!(ct_log.rfc6962_enabled, "CERTSTREAM_RFC6962_ENABLED");
+        env_override!(ct_log.static_ct_enabled, "CERTSTREAM_STATIC_CT_ENABLED");
 
         let mut connection_limit = yaml_config.connection_limit.unwrap_or_default();
-        if let Ok(v) = env::var("CERTSTREAM_CONNECTION_LIMIT_ENABLED") {
-            connection_limit.enabled = v.parse().unwrap_or(connection_limit.enabled);
-        }
-        if let Ok(v) = env::var("CERTSTREAM_CONNECTION_LIMIT_MAX_CONNECTIONS") {
-            connection_limit.max_connections = v.parse().unwrap_or(connection_limit.max_connections);
-        }
-        if let Ok(v) = env::var("CERTSTREAM_CONNECTION_LIMIT_PER_IP_LIMIT") {
-            connection_limit.per_ip_limit = v.parse().ok();
-        }
+        env_override!(connection_limit.enabled, "CERTSTREAM_CONNECTION_LIMIT_ENABLED");
+        env_override!(connection_limit.max_connections, "CERTSTREAM_CONNECTION_LIMIT_MAX_CONNECTIONS");
+        env_override!(connection_limit.per_ip_limit, "CERTSTREAM_CONNECTION_LIMIT_PER_IP_LIMIT", ok_opt);
 
         let mut rate_limit = yaml_config.rate_limit.unwrap_or_default();
-        if let Ok(v) = env::var("CERTSTREAM_RATE_LIMIT_ENABLED") {
-            rate_limit.enabled = v.parse().unwrap_or(rate_limit.enabled);
-        }
+        env_override!(rate_limit.enabled, "CERTSTREAM_RATE_LIMIT_ENABLED");
 
         let api = yaml_config.api.unwrap_or_default();
 
         let mut auth = yaml_config.auth.unwrap_or_default();
-        if let Ok(v) = env::var("CERTSTREAM_AUTH_ENABLED") {
-            auth.enabled = v.parse().unwrap_or(auth.enabled);
-        }
+        env_override!(auth.enabled, "CERTSTREAM_AUTH_ENABLED");
         if let Ok(v) = env::var("CERTSTREAM_AUTH_TOKENS") {
+            // Comma-split; macro doesn't cover this shape.
             auth.tokens = v.split(',').map(|s| s.trim().to_string()).collect();
         }
-        if let Ok(v) = env::var("CERTSTREAM_AUTH_HEADER_NAME") {
-            auth.header_name = v;
-        }
+        env_override!(auth.header_name, "CERTSTREAM_AUTH_HEADER_NAME", str);
 
         let mut hot_reload = yaml_config.hot_reload.unwrap_or_default();
-        if let Ok(v) = env::var("CERTSTREAM_HOT_RELOAD_ENABLED") {
-            hot_reload.enabled = v.parse().unwrap_or(hot_reload.enabled);
-        }
-        if let Ok(v) = env::var("CERTSTREAM_HOT_RELOAD_WATCH_PATH") {
-            hot_reload.watch_path = Some(v);
-        }
+        env_override!(hot_reload.enabled, "CERTSTREAM_HOT_RELOAD_ENABLED");
+        env_override!(hot_reload.watch_path, "CERTSTREAM_HOT_RELOAD_WATCH_PATH", some_str);
 
         let mut dedup = yaml_config.dedup.unwrap_or_default();
-        if let Ok(v) = env::var("CERTSTREAM_DEDUP_CAPACITY") {
-            dedup.capacity = v.parse().unwrap_or(dedup.capacity);
-        }
-        if let Ok(v) = env::var("CERTSTREAM_DEDUP_TTL_SECS") {
-            dedup.ttl_secs = v.parse().unwrap_or(dedup.ttl_secs);
-        }
+        env_override!(dedup.capacity, "CERTSTREAM_DEDUP_CAPACITY");
+        env_override!(dedup.ttl_secs, "CERTSTREAM_DEDUP_TTL_SECS");
 
         let mut streams = yaml_config.streams.unwrap_or_default();
-        if let Ok(v) = env::var("CERTSTREAM_STREAM_FULL_ENABLED") {
-            streams.full = v.parse().unwrap_or(streams.full);
-        }
-        if let Ok(v) = env::var("CERTSTREAM_STREAM_LITE_ENABLED") {
-            streams.lite = v.parse().unwrap_or(streams.lite);
-        }
-        if let Ok(v) = env::var("CERTSTREAM_STREAM_DOMAINS_ONLY_ENABLED") {
-            streams.domains_only = v.parse().unwrap_or(streams.domains_only);
-        }
+        env_override!(streams.full, "CERTSTREAM_STREAM_FULL_ENABLED");
+        env_override!(streams.lite, "CERTSTREAM_STREAM_LITE_ENABLED");
+        env_override!(streams.domains_only, "CERTSTREAM_STREAM_DOMAINS_ONLY_ENABLED");
 
         Self {
             host,
@@ -670,9 +612,9 @@ impl Config {
             });
         }
 
-        if self.rate_limit.enabled && self.rate_limit.free_refill_rate <= 0.0 {
+        if self.rate_limit.enabled && self.rate_limit.refill_rate <= 0.0 {
             errors.push(ConfigValidationError {
-                field: "rate_limit.free_refill_rate".to_string(),
+                field: "rate_limit.refill_rate".to_string(),
                 message: "Refill rate must be positive".to_string(),
             });
         }
@@ -809,8 +751,6 @@ static_ct_enabled: false
         assert!(!config.enabled);
         assert!(config.tokens.is_empty());
         assert_eq!(config.header_name, "Authorization");
-        assert!(config.standard_tokens.is_empty());
-        assert!(config.premium_tokens.is_empty());
     }
 
     #[test]
@@ -922,10 +862,23 @@ port: 9090
     fn test_rate_limit_config_defaults() {
         let config = RateLimitConfig::default();
         assert!(!config.enabled);
-        assert_eq!(config.free_max_tokens, 100.0);
-        assert_eq!(config.free_refill_rate, 10.0);
+        assert_eq!(config.max_tokens, 100.0);
+        assert_eq!(config.refill_rate, 10.0);
+        assert_eq!(config.burst, 20.0);
         assert_eq!(config.window_seconds, 60);
         assert_eq!(config.window_max_requests, 1000);
+    }
+
+    #[test]
+    fn test_rate_limit_config_back_compat_aliases() {
+        // Legacy YAML using `free_*` keys must still parse so v1.4 configs
+        // don't break on upgrade.
+        let yaml = "enabled: true\nfree_max_tokens: 42\nfree_refill_rate: 7\nfree_burst: 3\n";
+        let cfg: RateLimitConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(cfg.enabled);
+        assert_eq!(cfg.max_tokens, 42.0);
+        assert_eq!(cfg.refill_rate, 7.0);
+        assert_eq!(cfg.burst, 3.0);
     }
 
     #[test]

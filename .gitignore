@@ -6,4 +6,11 @@
 config.yaml
 config.yml
 .DS_Store
-certstream_state.jsonconfig.test.yaml
+certstream_state.json
+config.test.yaml
+config.soak.yaml
+soak-state/
+fuzz/target/
+fuzz/corpus/
+fuzz/artifacts/
+heap-profile/

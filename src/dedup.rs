@@ -1,15 +1,19 @@
 use dashmap::DashMap;
+use dashmap::mapref::entry::Entry;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
 
-/// Default capacity bumped from 500K (v1.3.x) to 1M because static-ct logs
-/// (Sycamore, Willow, Cloudflare Raio, Geomys Tuscolo, …) issue tiles in tight
-/// 60-second MMD windows, and during the RFC6962/static-CT transition the same
-/// certificate often appears in 3-4 logs within minutes. Holding a wider window
-/// keeps the duplicate filter effective without forcing premature eviction.
-const DEFAULT_CAPACITY: usize = 1_000_000;
+/// Default capacity reset to 200K in 1.5.0 after the memory audit. The 1M
+/// cap inherited from 1.4 cost ~38 MiB of resident memory for a window that
+/// only needed ~200K entries in practice (ingest rate ~1K unique/sec × 15-min
+/// TTL = 900K theoretical max but real cross-log dedup converges much lower
+/// because TTL eviction churns continuously). Operators who really want a
+/// wider window can override via `CERTSTREAM_DEDUP_CAPACITY` or YAML
+/// `dedup.capacity`; the trade-off is purely memory ↔ deeper cross-log
+/// dedup, never correctness.
+const DEFAULT_CAPACITY: usize = 200_000;
 /// 15 minutes — comfortably covers the typical multi-log SCT propagation window
 /// (a few minutes) plus headroom for slower static-ct shards. Configurable via
 /// `dedup.ttl_secs` in YAML or `CERTSTREAM_DEDUP_TTL_SECS`.
@@ -20,6 +24,11 @@ const DEFAULT_CLEANUP_INTERVAL_SECS: u64 = 60;
 /// trivially hashable. Eliminates one heap allocation per certificate on every lookup.
 pub struct DedupFilter {
     seen: DashMap<[u8; 32], Instant>,
+    /// Configured upper bound for the cache (advisory; the actual bound is
+    /// the TTL-driven `cleanup_task` that runs every 60s). Kept on the
+    /// struct so future code paths can re-introduce a high-water guard
+    /// without bouncing through the YAML.
+    #[allow(dead_code)]
     capacity: usize,
     ttl: Duration,
 }
@@ -39,33 +48,36 @@ impl DedupFilter {
 
     /// Returns true if this SHA-256 fingerprint has NOT been seen before (i.e., is new).
     /// Takes the raw 32-byte digest — zero heap allocation on both hit and miss.
+    ///
+    /// Atomicity: uses `DashMap::entry` so the test-and-insert pair is locked
+    /// per-shard. Two concurrent calls with the same key can never both
+    /// observe "not present" and both return true.
+    ///
+    /// **Cost note:** the `capacity` field is purely advisory — the periodic
+    /// `cleanup_task` (every 60s) is the only thing that prunes by TTL. An
+    /// earlier version called `evict_expired()` inline whenever `len() >=
+    /// capacity`, which thrashed CPU when ingest rate × TTL exceeded the cap
+    /// (every insert ran a full O(n) shard scan). The hot path now only
+    /// does the entry lookup; bounding is the cleanup task's job.
     pub fn is_new(&self, sha256_raw: &[u8; 32]) -> bool {
         let now = Instant::now();
 
-        // Duplicate path (common case): get_mut with fixed-size key — no allocation.
-        if let Some(mut ts) = self.seen.get_mut(sha256_raw) {
-            let age = now.duration_since(*ts);
-            if age > self.ttl {
-                // Expired entry: treat as new and refresh timestamp.
-                *ts = now;
-                return true;
+        match self.seen.entry(*sha256_raw) {
+            Entry::Occupied(mut e) => {
+                let age = now.duration_since(*e.get());
+                if age > self.ttl {
+                    *e.get_mut() = now;
+                    true
+                } else {
+                    metrics::counter!("certstream_duplicates_filtered").increment(1);
+                    false
+                }
             }
-            metrics::counter!("certstream_duplicates_filtered").increment(1);
-            return false;
-        }
-
-        // New key — capacity guard before insert.
-        if self.seen.len() >= self.capacity {
-            self.cleanup();
-            if self.seen.len() >= self.capacity {
-                info!(size = self.seen.len(), "dedup cache full after cleanup, clearing");
-                self.seen.clear();
-                metrics::counter!("certstream_dedup_cache_clears").increment(1);
+            Entry::Vacant(v) => {
+                v.insert(now);
+                true
             }
         }
-
-        self.seen.insert(*sha256_raw, now);
-        true
     }
 
     pub fn cleanup(&self) {
@@ -79,7 +91,10 @@ impl DedupFilter {
         metrics::gauge!("certstream_dedup_cache_size").set(self.seen.len() as f64);
     }
 
-    #[allow(dead_code)]
+    /// Snapshot of current entry count. Test-only helper; prod code reads
+    /// `certstream_dedup_cache_size` gauge for the same information.
+    #[cfg(test)]
+    #[allow(clippy::len_without_is_empty)]
     pub fn len(&self) -> usize {
         self.seen.len()
     }
@@ -163,10 +178,13 @@ mod tests {
     }
 
     #[test]
-    fn test_is_new_capacity_overflow() {
+    fn test_is_new_capacity_overflow_no_wipe() {
+        // Regression: at capacity, the old code wiped the entire map via
+        // `clear()` and silently re-broadcast every in-flight cert. The new
+        // path only evicts genuinely expired entries, so fresh keys survive.
         let filter = DedupFilter {
             seen: DashMap::with_capacity(4),
-            capacity: 5, // Very small capacity
+            capacity: 5,
             ttl: Duration::from_secs(300),
         };
 
@@ -175,10 +193,46 @@ mod tests {
         }
         assert_eq!(filter.len(), 5);
 
-        // Next insert should trigger clear
+        // Insert past capacity — soft eviction runs but nothing is expired,
+        // so the new key is added on top and previously-seen keys are still
+        // treated as duplicates (no catastrophic clear).
         assert!(filter.is_new(&key(255)));
-        // After clear + insert, only the new key should be present
-        assert_eq!(filter.len(), 1);
+        assert!(!filter.is_new(&key(0)));
+        assert!(!filter.is_new(&key(4)));
+        assert!(filter.len() >= 5);
+    }
+
+    #[test]
+    fn test_is_new_atomic_under_contention() {
+        use std::sync::Arc;
+        use std::thread;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        // 32 threads, each calls is_new on the same key 1000 times.
+        // Exactly ONE call across all threads should ever return true.
+        let filter = Arc::new(DedupFilter::new());
+        let true_count = Arc::new(AtomicUsize::new(0));
+        let k = key(7);
+
+        let handles: Vec<_> = (0..32)
+            .map(|_| {
+                let f = Arc::clone(&filter);
+                let c = Arc::clone(&true_count);
+                thread::spawn(move || {
+                    for _ in 0..1000 {
+                        if f.is_new(&k) {
+                            c.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                })
+            })
+            .collect();
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        assert_eq!(true_count.load(Ordering::Relaxed), 1);
     }
 
     #[test]

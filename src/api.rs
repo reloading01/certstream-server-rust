@@ -140,10 +140,20 @@ impl CertificateCache {
         };
 
         // Remove evicted cert from hash_index after releasing the VecDeque lock.
+        // P1 fix: only remove the index entry if it STILL points at the evicted
+        // Arc. Pre-1.5.0 a re-broadcast of the same SHA-256 after TTL eviction
+        // would overwrite the index with the new Arc, then a subsequent
+        // eviction of the OLDER copy would blindly remove the index entry
+        // that now belongs to the NEWER copy — leaving /api/cert/{hash}
+        // returning 404 for a cert that's still in the queue.
         if let Some(old) = evicted {
-            self.hash_index.remove(&normalize_hash(&old.leaf.sha256));
-            self.hash_index.remove(&normalize_hash(&old.leaf.sha1));
-            self.hash_index.remove(&normalize_hash(&old.leaf.fingerprint));
+            for key in [
+                normalize_hash(&old.leaf.sha256),
+                normalize_hash(&old.leaf.sha1),
+                normalize_hash(&old.leaf.fingerprint),
+            ] {
+                self.hash_index.remove_if(&key, |_, current| Arc::ptr_eq(current, &old));
+            }
         }
     }
 
@@ -155,6 +165,11 @@ impl CertificateCache {
 
     pub fn len(&self) -> usize {
         self.entries.read().len()
+    }
+
+    #[allow(dead_code)]
+    pub fn is_empty(&self) -> bool {
+        self.entries.read().is_empty()
     }
 
     pub fn capacity(&self) -> usize {
@@ -177,6 +192,12 @@ pub struct TrackedLog {
     pub tree_size: u64,
     pub total_errors: u64,
     pub last_success: Option<i64>,
+}
+
+impl Default for LogTracker {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl LogTracker {
@@ -252,6 +273,12 @@ pub struct ServerStats {
     pub messages_sent: AtomicU64,
     pub certificates_processed: AtomicU64,
     pub bytes_sent: AtomicU64,
+}
+
+impl Default for ServerStats {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ServerStats {

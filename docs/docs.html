@@ -113,11 +113,12 @@
                     <div class="feature-item">
                         <h3>Why Rust?</h3>
                         <ul>
-                            <li>~150MB stable RSS (flat footprint under sustained load — no growth over time)</li>
-                            <li>Zero-copy broadcast via <code>Arc&lt;PreSerializedMessage&gt;</code> — serialize once, deliver to all</li>
-                            <li>Handles 50,000+ concurrent connections</li>
+                            <li>~118 MiB stable RSS under load (default config + 100 WS clients, 10-min plateau, ±5 MiB swing)</li>
+                            <li>Pre-serialized broadcast via <code>Arc&lt;PreSerializedMessage&gt;</code> + zero-copy <code>Utf8Bytes</code> Text frames (v1.5.0) — no per-subscriber re-encoding</li>
+                            <li>Idle-server pre-serialize guard (v1.5.0) — JSON skipped entirely when no clients are connected</li>
+                            <li>Single shared issuer cache across all static-CT watchers (v1.5.0)</li>
                             <li>SIMD-accelerated JSON serialization via <code>simd-json</code> (enabled by default)</li>
-                            <li>Single binary, no dependencies</li>
+                            <li>Single binary, no runtime dependencies</li>
                         </ul>
                     </div>
                 </div>
@@ -677,38 +678,38 @@ docker compose up -d</pre>
                     </thead>
                     <tbody>
                         <tr>
-                            <td>Memory (idle)</td>
-                            <td><strong>27 MB</strong></td>
-                            <td>~49 MB</td>
+                            <td>Memory — idle (no clients)</td>
+                            <td><strong>113–118 MiB</strong></td>
+                            <td>n/a</td>
                         </tr>
                         <tr>
-                            <td>Memory (under load, stable)</td>
-                            <td><strong>~150 MB</strong></td>
-                            <td>~309 MB</td>
+                            <td>Memory — avg, 100 WS clients</td>
+                            <td>117 MiB</td>
+                            <td>~100 MiB</td>
                         </tr>
                         <tr>
-                            <td>CPU (avg under load)</td>
-                            <td><strong>23%</strong></td>
-                            <td>72%</td>
+                            <td>Memory — peak, 100 WS clients</td>
+                            <td><strong>118 MiB</strong></td>
+                            <td>161 MiB</td>
                         </tr>
                         <tr>
-                            <td>Latency (avg)</td>
-                            <td><strong>8.4ms</strong></td>
-                            <td>9.2ms</td>
+                            <td>Plateau swing</td>
+                            <td><strong>±5 MiB</strong></td>
+                            <td>±66 MiB</td>
                         </tr>
                         <tr>
-                            <td>P99 Latency</td>
-                            <td><strong>172ms</strong></td>
-                            <td>187ms</td>
+                            <td>CPU — avg, 100 clients</td>
+                            <td><strong>13 %</strong></td>
+                            <td>38 %</td>
                         </tr>
                         <tr>
-                            <td>Broadcast throughput</td>
-                            <td><strong>48.6K/s</strong></td>
-                            <td>27K/s</td>
+                            <td>Static-CT-API v1.0.0-rc.1</td>
+                            <td><strong>Yes</strong></td>
+                            <td>No (RFC6962 only)</td>
                         </tr>
                     </tbody>
                 </table>
-                <p style="margin-top: 1rem;"><strong>Result (v1.3.0):</strong> ~2x less memory under load (flat RSS, no growth over time), 1.8x higher broadcast throughput, zero-copy pipeline via <code>Arc&lt;PreSerializedMessage&gt;</code>.</p>
+                <p style="margin-top: 1rem;"><strong>v1.5.0 setup:</strong> parallel containers on the same Docker host, default config, 100 concurrent WebSocket clients, 10-minute plateau window. Rust uses ~3× less CPU than Go at the same load and has a much tighter memory plateau (no GC pressure); Go's average steady-state RSS is competitive but its peak/swing is wider. Reproduce locally with the scripts in <code>soak/</code>.</p>
             </div>
         </section>
 

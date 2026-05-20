@@ -20,7 +20,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
-use tower_http::cors::CorsLayer;
+use tower_http::cors::{Any as CorsAny, CorsLayer};
 use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
@@ -33,12 +33,17 @@ use health::{deep_health, example_json, health, HealthState};
 use hot_reload::{HotReloadManager, HotReloadableConfig};
 use middleware::{auth_middleware, rate_limit_middleware, AuthMiddleware, ConnectionLimiter};
 use models::PreSerializedMessage;
-use rate_limit::{RateLimiter, TierTokens};
+use rate_limit::RateLimiter;
 use sse::handle_sse_stream;
 use state::StateManager;
 use websocket::{handle_domains_only, handle_full_stream, handle_lite_stream, AppState, ConnectionCounter};
 
-#[tokio::main]
+// CT polling + WS broadcast are heavily I/O-bound; CPU work is bursty (JSON
+// parse + cert deserialise) and cheap relative to the network wait. 4 worker
+// threads is plenty in practice and saves ~8 MiB of resident memory vs the
+// runtime default (= number of logical CPUs, often 8 on modern hosts).
+// Operators with extreme load can override via TOKIO_WORKER_THREADS env var.
+#[tokio::main(worker_threads = 4)]
 async fn main() {
     let cli_args = CliArgs::parse();
 
@@ -57,6 +62,19 @@ async fn main() {
     if cli_args.validate_config {
         print_config_validation(&config);
         return;
+    }
+
+    // Always validate on normal startup too — `--validate-config` is opt-in
+    // and most operators don't run it. Without this, an invalid `buffer_size:
+    // 0` would reach `broadcast::channel(0)` and panic on a fresh boot.
+    // (P0 fix.) `--export-metrics` and `--dry-run` are still allowed to skip
+    // because they're operator probes, not real servers.
+    if !cli_args.export_metrics && let Err(errors) = config.validate() {
+        eprintln!("Configuration validation failed:");
+        for err in errors {
+            eprintln!("  - {}: {}", err.field, err.message);
+        }
+        std::process::exit(1);
     }
 
     if cli_args.export_metrics {
@@ -103,12 +121,23 @@ async fn main() {
     metrics::counter!("certstream_duplicates_filtered").increment(0);
     metrics::counter!("certstream_static_ct_checkpoint_errors").increment(0);
 
-    let (tx, _rx) = broadcast::channel::<Arc<PreSerializedMessage>>(config.buffer_size);
+    // No placeholder Receiver here. The pre-1.5.0 version bound `_rx` which
+    // stayed alive for the whole process — that kept `tx.receiver_count()` at
+    // ≥1 forever and silently defeated the idle-server pre-serialize guard
+    // (#13). `tx.send()` returning `Err(SendError)` on zero subscribers is
+    // already ignored downstream (`let _ = tx.send(...)`), so no placeholder
+    // is needed for correctness.
+    let tx: broadcast::Sender<Arc<PreSerializedMessage>> =
+        broadcast::channel(config.buffer_size).0;
 
     let client = Client::builder()
         .user_agent(format!("certstream-server-rust/{}", VERSION))
-        .pool_max_idle_per_host(20)
-        .pool_idle_timeout(Duration::from_secs(90))
+        // Pre-1.5.0 kept 20 idle connections per host × 55 hosts = 1100
+        // hot TCP sockets, ~40-55 MiB of kernel + TLS state per process.
+        // CT log polls are sequential per watcher (rate-limited at the
+        // OperatorLimiter); 4 idle per host is enough for retry overlap.
+        .pool_max_idle_per_host(4)
+        .pool_idle_timeout(Duration::from_secs(60))
         .tcp_nodelay(true)
         .build()
         .expect("failed to build http client");
@@ -156,15 +185,7 @@ async fn main() {
     let server_stats = Arc::new(ServerStats::new());
     let cert_cache = Arc::new(CertificateCache::new(config.api.cache_capacity));
 
-    let tier_tokens = TierTokens {
-        standard: config.auth.standard_tokens.clone(),
-        premium: config.auth.premium_tokens.clone(),
-    };
-    let rate_limiter = RateLimiter::new(
-        config.rate_limit.clone(),
-        tier_tokens,
-        hot_reload_manager.clone(),
-    );
+    let rate_limiter = RateLimiter::new(config.rate_limit.clone(), hot_reload_manager.clone());
 
     info!(url = %config.ct_logs_url, "fetching CT log list");
 
@@ -193,6 +214,9 @@ async fn main() {
         info!("domains-only stream disabled by config");
     }
 
+    // Single issuer cache shared across all static-CT watchers.
+    let issuer_cache = Arc::new(ct::static_ct::IssuerCache::new());
+
     if !cli_args.dry_run {
         let watcher_ctx = WatcherContext {
             client: client.clone(),
@@ -206,6 +230,7 @@ async fn main() {
             dedup: dedup_filter.clone(),
             rate_limiter: None,
             streams: streams.clone(),
+            issuer_cache: issuer_cache.clone(),
         };
 
         let (rfc_count, static_count) =
@@ -304,8 +329,7 @@ fn spawn_signal_handler(shutdown_token: CancellationToken) {
 /// logs of the same operator so a single CDN host doesn't see a thundering
 /// herd from per-shard watchers.
 fn make_operator_limiter() -> ct::OperatorRateLimiter {
-    let interval = tokio::time::interval(Duration::from_millis(500));
-    Arc::new(tokio::sync::Mutex::new(interval))
+    Arc::new(ct::OperatorLimiter::new(Duration::from_millis(500)))
 }
 
 /// Discovery + spawn pipeline. Returns `(rfc6962_count, static_ct_count)`.
@@ -336,17 +360,14 @@ async fn discover_and_spawn(
     // Splice in the user's static_logs from config. We dedupe by URL so a
     // user-provided override (e.g. with a custom log_origin) takes precedence
     // over discovery for the same monitoring URL.
-    let mut config_static_urls = std::collections::HashSet::new();
-    for sl in &config.static_logs {
-        let normalized = sl.url.trim_end_matches('/').to_string();
-        config_static_urls.insert(normalized);
-    }
+    let config_static_urls: std::collections::HashSet<String> = config
+        .static_logs
+        .iter()
+        .map(|sl| sl.url.trim_end_matches('/').to_string())
+        .collect();
     all_logs.retain(|l| {
-        if l.log_type == LogType::StaticCt {
-            !config_static_urls.contains(l.url.trim_end_matches('/'))
-        } else {
-            true
-        }
+        l.log_type != LogType::StaticCt
+            || !config_static_urls.contains(l.url.trim_end_matches('/'))
     });
     for sl in &config.static_logs {
         all_logs.push(ct::CtLog::from(sl.clone()));
@@ -358,121 +379,135 @@ async fn discover_and_spawn(
 
     let mut operator_limiters: HashMap<String, OperatorRateLimiter> = HashMap::new();
 
-    let rfc_count = if config.ct_log.rfc6962_enabled {
-        info!(count = rfc_logs.len(), "found CT logs (RFC 6962)");
-        metrics::gauge!("certstream_ct_logs_count").set(rfc_logs.len() as f64);
+    let rfc_count = spawn_pool(
+        "RFC 6962",
+        config.ct_log.rfc6962_enabled,
+        rfc_logs,
+        log_tracker,
+        ctx,
+        &mut operator_limiters,
+        "certstream_ct_logs_count",
+        50,
+        WorkerKind::Rfc6962,
+    );
 
-        for log in &rfc_logs {
-            operator_limiters
-                .entry(log.operator.to_lowercase())
-                .or_insert_with(make_operator_limiter);
-        }
-
-        for log in &rfc_logs {
-            log_tracker.register(
-                log.description.clone(),
-                log.normalized_url(),
-                log.operator.clone(),
-            );
-        }
-
-        for (index, log) in rfc_logs.iter().cloned().enumerate() {
-            let mut ctx = ctx.clone();
-            ctx.rate_limiter = operator_limiters.get(&log.operator.to_lowercase()).cloned();
-            let cancel = ctx.shutdown.clone();
-
-            tokio::spawn(async move {
-                tokio::time::sleep(Duration::from_millis(50 * index as u64)).await;
-                let log_name = log.description.clone();
-                loop {
-                    let result = std::panic::AssertUnwindSafe(
-                        ct::watcher::run_watcher_with_cache(log.clone(), ctx.clone()),
-                    );
-
-                    tokio::select! {
-                        _ = cancel.cancelled() => {
-                            info!(log = %log_name, "worker stopped by shutdown signal");
-                            break;
-                        }
-                        res = futures::FutureExt::catch_unwind(result) => {
-                            match res {
-                                Ok(_) => break,
-                                Err(_) => {
-                                    error!(log = %log_name, "worker panicked, restarting in 5s");
-                                    metrics::counter!("certstream_worker_panics").increment(1);
-                                    tokio::time::sleep(Duration::from_secs(5)).await;
-                                }
-                            }
-                        }
-                    }
-                }
-            });
-        }
-        rfc_logs.len()
-    } else {
-        info!("RFC 6962 watchers disabled by config (rfc6962_enabled=false)");
-        metrics::gauge!("certstream_ct_logs_count").set(0.0);
-        0
-    };
-
-    let static_count = if config.ct_log.static_ct_enabled {
-        info!(count = static_logs.len(), "found CT logs (static-ct-api)");
-        metrics::gauge!("certstream_static_ct_logs_count").set(static_logs.len() as f64);
-
-        for log in &static_logs {
-            operator_limiters
-                .entry(log.operator.to_lowercase())
-                .or_insert_with(make_operator_limiter);
-        }
-
-        for log in &static_logs {
-            log_tracker.register(
-                log.description.clone(),
-                log.normalized_url(),
-                log.operator.clone(),
-            );
-        }
-
-        for (index, log) in static_logs.iter().cloned().enumerate() {
-            let mut ctx = ctx.clone();
-            ctx.rate_limiter = operator_limiters.get(&log.operator.to_lowercase()).cloned();
-            let cancel = ctx.shutdown.clone();
-
-            tokio::spawn(async move {
-                tokio::time::sleep(Duration::from_millis(100 * index as u64)).await;
-                let log_name = log.description.clone();
-                loop {
-                    let result = std::panic::AssertUnwindSafe(
-                        ct::static_ct::run_static_ct_watcher(log.clone(), ctx.clone()),
-                    );
-
-                    tokio::select! {
-                        _ = cancel.cancelled() => {
-                            info!(log = %log_name, "static CT worker stopped by shutdown signal");
-                            break;
-                        }
-                        res = futures::FutureExt::catch_unwind(result) => {
-                            match res {
-                                Ok(_) => break,
-                                Err(_) => {
-                                    error!(log = %log_name, "static CT worker panicked, restarting in 5s");
-                                    metrics::counter!("certstream_worker_panics").increment(1);
-                                    tokio::time::sleep(Duration::from_secs(5)).await;
-                                }
-                            }
-                        }
-                    }
-                }
-            });
-        }
-        static_logs.len()
-    } else {
-        info!("static-CT watchers disabled by config (static_ct_enabled=false)");
-        metrics::gauge!("certstream_static_ct_logs_count").set(0.0);
-        0
-    };
+    let static_count = spawn_pool(
+        "static-ct-api",
+        config.ct_log.static_ct_enabled,
+        static_logs,
+        log_tracker,
+        ctx,
+        &mut operator_limiters,
+        "certstream_static_ct_logs_count",
+        100,
+        WorkerKind::StaticCt,
+    );
 
     (rfc_count, static_count)
+}
+
+#[derive(Clone, Copy)]
+enum WorkerKind {
+    Rfc6962,
+    StaticCt,
+}
+
+impl WorkerKind {
+    fn label(self) -> &'static str {
+        match self {
+            WorkerKind::Rfc6962 => "worker",
+            WorkerKind::StaticCt => "static CT worker",
+        }
+    }
+}
+
+/// Register a pool of watchers, attach per-operator rate limiters, and spawn
+/// each worker behind a restart-on-panic supervisor. Returns the number of
+/// workers actually spawned (0 if the pool is disabled by config).
+#[allow(clippy::too_many_arguments)]
+fn spawn_pool(
+    family: &'static str,
+    enabled: bool,
+    logs: Vec<ct::CtLog>,
+    log_tracker: &Arc<LogTracker>,
+    ctx: &WatcherContext,
+    operator_limiters: &mut std::collections::HashMap<String, ct::OperatorRateLimiter>,
+    count_gauge: &'static str,
+    startup_stagger_ms: u64,
+    kind: WorkerKind,
+) -> usize {
+    if !enabled {
+        info!(family, "watchers disabled by config");
+        metrics::gauge!(count_gauge).set(0.0);
+        return 0;
+    }
+
+    info!(count = logs.len(), family, "found CT logs");
+    metrics::gauge!(count_gauge).set(logs.len() as f64);
+
+    for log in &logs {
+        operator_limiters
+            .entry(log.operator.to_lowercase())
+            .or_insert_with(make_operator_limiter);
+        log_tracker.register(
+            log.description.clone(),
+            log.normalized_url(),
+            log.operator.clone(),
+        );
+    }
+
+    let count = logs.len();
+    for (index, log) in logs.into_iter().enumerate() {
+        let mut wctx = ctx.clone();
+        wctx.rate_limiter = operator_limiters
+            .get(&log.operator.to_lowercase())
+            .cloned();
+        spawn_worker_loop(log, wctx, startup_stagger_ms * index as u64, kind);
+    }
+    count
+}
+
+/// Supervisor that runs a watcher in a panic-resilient loop. On panic, logs
+/// the failure, bumps the `certstream_worker_panics` counter, sleeps 5s, and
+/// restarts. Exits cleanly on shutdown cancellation.
+fn spawn_worker_loop(log: ct::CtLog, ctx: WatcherContext, startup_delay_ms: u64, kind: WorkerKind) {
+    let cancel = ctx.shutdown.clone();
+    tokio::spawn(async move {
+        if startup_delay_ms > 0 {
+            tokio::time::sleep(Duration::from_millis(startup_delay_ms)).await;
+        }
+        let log_name = log.description.clone();
+        let label = kind.label();
+        loop {
+            let fut = std::panic::AssertUnwindSafe(async {
+                match kind {
+                    WorkerKind::Rfc6962 => {
+                        ct::watcher::run_watcher_with_cache(log.clone(), ctx.clone()).await
+                    }
+                    WorkerKind::StaticCt => {
+                        ct::static_ct::run_static_ct_watcher(log.clone(), ctx.clone()).await
+                    }
+                }
+            });
+
+            tokio::select! {
+                _ = cancel.cancelled() => {
+                    info!(log = %log_name, kind = %label, "worker stopped by shutdown signal");
+                    break;
+                }
+                res = futures::FutureExt::catch_unwind(fut) => {
+                    match res {
+                        Ok(_) => break,
+                        Err(_) => {
+                            error!(log = %log_name, kind = %label, "worker panicked, restarting in 5s");
+                            metrics::counter!("certstream_worker_panics").increment(1);
+                            tokio::time::sleep(Duration::from_secs(5)).await;
+                        }
+                    }
+                }
+            }
+        }
+    });
 }
 
 /// Dependencies needed to build the HTTP router.
@@ -624,10 +659,25 @@ fn build_router(protocols: &config::ProtocolConfig, config: &Config, deps: Route
         );
     }
 
+    // CORS policy:
+    //   * `public_app` (/health, /metrics, /example.json) is operator-facing —
+    //     intended for Kubernetes probes and Prometheus scrapers, NOT for
+    //     cross-origin browser fetches. We don't add CORS headers; a malicious
+    //     web page cannot read /metrics from a victim's browser.
+    //   * `protected_app` (WS, SSE, /api/cert/{hash}) is the public data
+    //     surface — browser CT viewers consume it cross-origin, so it gets a
+    //     permissive (any origin, GET only) CORS layer. Auth tokens, when
+    //     enabled, are sent via header so credentials=false is fine.
+    let protected_app = protected_app.layer(
+        CorsLayer::new()
+            .allow_origin(CorsAny)
+            .allow_methods([axum::http::Method::GET, axum::http::Method::HEAD])
+            .allow_headers(CorsAny),
+    );
+
     Router::new()
         .merge(public_app)
         .merge(protected_app)
-        .layer(CorsLayer::permissive())
         .fallback(handler_404)
 }
 
@@ -638,42 +688,76 @@ async fn run_tls_server(
     tls_key: &Option<String>,
     shutdown_token: CancellationToken,
 ) {
-    let tls_config = axum_server::tls_rustls::RustlsConfig::from_pem_file(
-        tls_cert.as_ref().unwrap(),
-        tls_key.as_ref().unwrap(),
-    )
-    .await
-    .expect("failed to load TLS config");
+    let cert_path = match tls_cert.as_ref() {
+        Some(p) => p,
+        None => {
+            error!("TLS mode requested but tls_cert is missing");
+            shutdown_token.cancel();
+            return;
+        }
+    };
+    let key_path = match tls_key.as_ref() {
+        Some(p) => p,
+        None => {
+            error!("TLS mode requested but tls_key is missing");
+            shutdown_token.cancel();
+            return;
+        }
+    };
+
+    let tls_config =
+        match axum_server::tls_rustls::RustlsConfig::from_pem_file(cert_path, key_path).await {
+            Ok(c) => c,
+            Err(e) => {
+                error!(cert = %cert_path, key = %key_path, error = %e, "failed to load TLS config");
+                shutdown_token.cancel();
+                return;
+            }
+        };
 
     let handle = axum_server::Handle::new();
     let shutdown_handle = handle.clone();
+    let cancel_for_signal = shutdown_token.clone();
     tokio::spawn(async move {
-        shutdown_token.cancelled().await;
+        cancel_for_signal.cancelled().await;
         info!("shutting down TLS server");
         shutdown_handle.graceful_shutdown(Some(Duration::from_secs(30)));
     });
 
-    axum_server::bind_rustls(addr, tls_config)
+    if let Err(e) = axum_server::bind_rustls(addr, tls_config)
         .handle(handle)
         .serve(app.into_make_service_with_connect_info::<SocketAddr>())
         .await
-        .expect("server error");
+    {
+        error!(error = %e, "TLS server exited with error");
+        shutdown_token.cancel();
+    }
 }
 
 async fn run_plain_server(addr: SocketAddr, app: Router, shutdown_token: CancellationToken) {
-    let listener = tokio::net::TcpListener::bind(addr)
-        .await
-        .expect("failed to bind");
-    axum::serve(
+    let listener = match tokio::net::TcpListener::bind(addr).await {
+        Ok(l) => l,
+        Err(e) => {
+            error!(address = %addr, error = %e, "failed to bind listener");
+            shutdown_token.cancel();
+            return;
+        }
+    };
+
+    let cancel_for_graceful = shutdown_token.clone();
+    if let Err(e) = axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),
     )
     .with_graceful_shutdown(async move {
-        shutdown_token.cancelled().await;
+        cancel_for_graceful.cancelled().await;
         info!("shutting down HTTP server");
     })
     .await
-    .expect("server error");
+    {
+        error!(error = %e, "HTTP server exited with error");
+        shutdown_token.cancel();
+    }
 }
 
 async fn handler_404() -> impl IntoResponse {

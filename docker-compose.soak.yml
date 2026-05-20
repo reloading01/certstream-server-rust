@@ -1,0 +1,26 @@
+# 24-hour soak override. Mounts the full-feature config + a state dir,
+# overrides healthcheck to also require an authenticated /api/stats hit
+# (so we detect auth-middleware regressions, not just /health alive).
+#
+# Usage: docker compose -f docker-compose.yml -f docker-compose.soak.yml up -d
+
+services:
+  certstream-server-rust:
+    container_name: certstream-soak
+    environment:
+      - CERTSTREAM_LOG_LEVEL=info
+      - CERTSTREAM_BUFFER_SIZE=4096
+    volumes:
+      - ./config.soak.yaml:/etc/certstream/config.yaml:ro
+      - ./soak-state:/var/lib/certstream
+    # Restart policy: never, so a panic surfaces visibly instead of being
+    # masked by docker's restart loop. The supervisor loop inside the binary
+    # already handles per-watcher panic recovery.
+    restart: "no"
+    healthcheck:
+      # /health (no auth) AND /metrics (no auth) — confirms both routers up.
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/health && curl -sf http://localhost:8080/metrics > /dev/null"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s

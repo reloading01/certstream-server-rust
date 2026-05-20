@@ -3,7 +3,7 @@
 A high-performance **certstream server** written in Rust. Monitors Certificate Transparency logs and streams newly issued SSL/TLS certificates in real-time via WebSocket and SSE. 
 
 [![GHCR](https://img.shields.io/badge/ghcr.io-reloading01%2Fcertstream--server--rust-blue?logo=github)](https://github.com/reloading01/certstream-server-rust/pkgs/container/certstream-server-rust)
-[![Rust](https://img.shields.io/badge/rust-1.88%2B-orange.svg)](https://www.rust-lang.org/)
+[![Rust](https://img.shields.io/badge/rust-edition%202024-orange.svg)](https://www.rust-lang.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Sponsor](https://img.shields.io/badge/sponsor-%E2%9D%A4-ff69b4?logo=githubsponsors)](https://github.com/sponsors/reloading01)
 
@@ -15,12 +15,13 @@ This Rust implementation delivers better performance than certstream-server-go w
 
 ### Why Rust?
 
-- 27 MB memory idle, ~150 MB stable RSS under load (flat — no growth over time)
-- ~1,000 msg/s sustained CT ingest rate; zero-copy broadcast via `Arc<PreSerializedMessage>`
-- 8.4 ms average latency
-- 23% CPU with 500 clients
+- ~118 MiB stable RSS under load (default config + 100 WS clients, 10-min plateau); plateau within ~5 minutes of startup, no growth over time
+- Single shared issuer cache across all static-CT watchers (1.5.0) — no per-log cache duplication
+- Pre-serialized broadcast via `Arc<PreSerializedMessage>` with zero-copy `Utf8Bytes` Text frames (1.5.0) — no per-subscriber JSON re-encoding
+- Idle-server pre-serialize guard (1.5.0) — JSON serialization skipped entirely when `receiver_count() == 0`
+- ~1,000 msg/s sustained CT ingest rate; tens of MB/s WS broadcast headroom
 - SIMD-accelerated JSON via `simd-json` (enabled by default)
-- Single binary, no dependencies
+- Single binary, no runtime dependencies
 
 ## Features
 
@@ -116,7 +117,20 @@ Disabling a stream type removes its WebSocket/SSE route and skips JSON serializa
 |----------|---------|-------------|
 | `CERTSTREAM_RATE_LIMIT_ENABLED` | false | Enable rate limiting |
 
-Rate limiting uses a hybrid token bucket + sliding window algorithm with tier-based limits (Free, Standard, Premium).
+Single-tier per-IP rate limit (token bucket + sliding window). Authenticated and unauthenticated clients hit the same per-source-IP ceiling — auth gates *who* may connect, rate-limit gates *how often*. YAML config:
+
+```yaml
+rate_limit:
+  enabled: true
+  max_tokens: 100         # bucket capacity per IP
+  refill_rate: 10         # tokens/second
+  burst: 20               # extra credits per burst_window
+  window_seconds: 60
+  window_max_requests: 1000
+  burst_window_seconds: 10
+```
+
+Legacy `free_max_tokens` / `free_refill_rate` / `free_burst` keys still parse via aliases for v1.4.x config compatibility — multi-tier (`standard_*` / `premium_*`) keys were removed in 1.5.0.
 
 **CT Log Settings**
 
@@ -196,21 +210,28 @@ curl http://localhost:8080/health/deep
 
 ## Performance Comparison
 
-Benchmarked with 500 concurrent WebSocket clients, 60 seconds, identical conditions (2 CPU cores, 2GB RAM per container):
+Benchmarked with 100 concurrent WebSocket clients pulling the lite stream against the same Docker host, default config on both sides:
 
-| Metric | Rust | Go | Elixir |
-|--------|------|-----|--------|
-| Memory (idle) | 27 MB | 49 MB | 230 MB |
-| Memory (under load, stable) | ~150 MB | 309 MB | 649 MB |
-| CPU (idle) | 5% | 36% | 172% |
-| CPU (under load) | 23% | 72% | 206% |
-| Throughput | 48.6K msg/s | 27K msg/s | 19K msg/s |
-| Avg Latency | 8.4 ms | 9.2 ms | 26.8 ms |
-| P99 Latency | 172 ms | 187 ms | 297 ms |
-| Connect Time | 162 ms | 156 ms | 784 ms |
+| Metric | Rust (1.5.0) | Go (0rickyy0) | Notes |
+|--------|-------------:|--------------:|-------|
+| Memory (steady, no clients) | **113-118 MiB** | n/a | 10-min plateau, default config, 55 CT watchers |
+| Memory (avg, 100 clients) | **117 MiB** | ~100 MiB | both broadcasting at full CT rate |
+| Memory (peak, 100 clients) | **118 MiB** | **161 MiB** | Go GC pressure causes burstier RSS |
+| CPU (avg, 100 clients) | **13 %** | 38 % | one core, single host |
+| Memory salınımı | ±5 MiB | ±66 MiB | Rust plateau çok daha sıkı |
+| Cold start to first cert | <2 s | <2 s | both pull Apple + Google log list at boot |
 
-**Rust vs Elixir**: ~4x less memory under load (flat ~150MB RSS), 2.5x higher throughput, 3.2x lower latency
-**Rust vs Go**: ~2x less memory under load, 3x lower CPU, 1.8x higher throughput
+What we genuinely beat Go on right now:
+- **~3× lower CPU** at the same load (no GC, no per-message JSON re-encoding)
+- **Tight memory plateau** (±5 MiB vs Go's ±66 MiB swing)
+- **Lower peak RSS** under load (118 vs 161 MiB)
+- **Static-CT-API v1.0.0-rc.1 conformance** (checkpoint, tile, leaf_index extension, tree-size monotonicity) — 0rickyy0/certstream-server-go is RFC6962-only at the time of writing
+- **Tunable issuer + dedup caches** shared across all watchers (1.5.0)
+
+What's still close:
+- **Average memory** is within ~15 % of Go's average. The price of holding a 1M-entry cross-log dedup window (~30-40 MiB) for the multi-log dedup quality guarantee — tunable down via `CERTSTREAM_DEDUP_CAPACITY` if you don't need it.
+
+Elixir comparison was dropped — the upstream calidog/certstream-server image isn't published, so any number we quoted would be from an unbuildable reference. Numbers above are reproducible with the scripts in `soak/` (run `bash soak/monitor-3way.sh` against your own two containers).
 
 ## Certificate Transparency Logs
 

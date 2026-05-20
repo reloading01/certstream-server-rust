@@ -74,6 +74,12 @@ impl StateManager {
         self.states.get(log_url).map(|s| s.current_index)
     }
 
+    /// Last persisted tree_size for this log, used by static-CT watchers to
+    /// re-seed their rollback high-water across restarts.
+    pub fn get_tree_size(&self, log_url: &str) -> Option<u64> {
+        self.states.get(log_url).map(|s| s.tree_size)
+    }
+
     pub fn update_index(&self, log_url: &str, index: u64, tree_size: u64) {
         let now = chrono::Utc::now().timestamp();
         self.states.insert(
@@ -88,12 +94,20 @@ impl StateManager {
     }
 
     pub async fn save_if_dirty(&self) {
-        if !self.dirty.load(Ordering::Relaxed) {
+        // Clear the dirty flag *before* snapshotting so that any concurrent
+        // update_index call during the save re-marks dirty and gets caught
+        // by the next tick. If we cleared after the snapshot (the previous
+        // behaviour), an update that landed between snapshot and clear would
+        // be silently dropped from the next save's trigger.
+        if !self.dirty.swap(false, Ordering::AcqRel) {
             return;
         }
 
-        if let Some(ref path) = self.file_path {
-            self.save_to_file(path).await;
+        if let Some(ref path) = self.file_path
+            && !self.save_to_file(path).await
+        {
+            // Save failed — re-arm so the next tick retries.
+            self.dirty.store(true, Ordering::Release);
         }
     }
 
@@ -112,7 +126,9 @@ impl StateManager {
         Ok(())
     }
 
-    async fn save_to_file(&self, path: &str) {
+    /// Returns true on a fully successful write+rename, false otherwise.
+    /// Caller re-arms the dirty flag on false.
+    async fn save_to_file(&self, path: &str) -> bool {
         let mut logs = std::collections::HashMap::new();
         for entry in self.states.iter() {
             logs.insert(entry.key().clone(), entry.value().clone());
@@ -120,32 +136,33 @@ impl StateManager {
 
         let state_file = StateFile { version: 1, logs };
 
-        match serde_json::to_string_pretty(&state_file) {
-            Ok(content) => {
-                let tmp_path = format!("{}.tmp", path);
-                match Self::write_and_sync(&tmp_path, content.as_bytes()).await {
-                    Ok(()) => match tokio::fs::rename(&tmp_path, path).await {
-                        Ok(_) => {
-                            self.dirty.store(false, Ordering::Relaxed);
-                            debug!(path = %path, "saved state to file");
-                        }
-                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                            // Concurrent save completed first — state already written
-                            self.dirty.store(false, Ordering::Relaxed);
-                            debug!(path = %path, "state already saved by concurrent flush");
-                        }
-                        Err(e) => {
-                            error!(path = %path, error = %e, "failed to rename state file");
-                            let _ = tokio::fs::remove_file(&tmp_path).await;
-                        }
-                    },
-                    Err(e) => {
-                        error!(tmp_path = %tmp_path, error = %e, "failed to write temp state file");
-                    }
-                }
-            }
+        let content = match serde_json::to_string(&state_file) {
+            Ok(c) => c,
             Err(e) => {
                 error!(error = %e, "failed to serialize state");
+                return false;
+            }
+        };
+
+        let tmp_path = format!("{}.tmp", path);
+        if let Err(e) = Self::write_and_sync(&tmp_path, content.as_bytes()).await {
+            error!(tmp_path = %tmp_path, error = %e, "failed to write temp state file");
+            return false;
+        }
+
+        match tokio::fs::rename(&tmp_path, path).await {
+            Ok(_) => {
+                debug!(path = %path, "saved state to file");
+                true
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                debug!(path = %path, "state already saved by concurrent flush");
+                true
+            }
+            Err(e) => {
+                error!(path = %path, error = %e, "failed to rename state file");
+                let _ = tokio::fs::remove_file(&tmp_path).await;
+                false
             }
         }
     }
@@ -352,6 +369,46 @@ mod tests {
                 Some(i * 100)
             );
         }
+    }
+
+    /// Regression for fix #5: static-CT rollback guard's `high_water_tree_size`
+    /// must be re-seeded from the persisted state file on restart. Pre-1.5.0
+    /// it was hardcoded to 0, defeating the persistence model.
+    #[test]
+    fn test_get_tree_size_after_reload() {
+        let path = temp_state_path("tree_size_reload");
+        cleanup_file(&path);
+
+        // First "process": write a tree_size for a log.
+        {
+            let mgr = StateManager::new(Some(path.clone()));
+            mgr.update_index("https://static.example.com", 1000, 12_345_678);
+            // Manually serialize since save_if_dirty is async
+            let mut logs = std::collections::HashMap::new();
+            for entry in mgr.states.iter() {
+                logs.insert(entry.key().clone(), entry.value().clone());
+            }
+            let sf = StateFile { version: 1, logs };
+            fs::write(&path, serde_json::to_string(&sf).unwrap()).unwrap();
+        }
+
+        // Second "process": load the same file, assert get_tree_size returns it.
+        {
+            let mgr = StateManager::new(Some(path.clone()));
+            assert_eq!(
+                mgr.get_tree_size("https://static.example.com"),
+                Some(12_345_678),
+                "high_water must be reloadable across restart"
+            );
+            assert_eq!(
+                mgr.get_index("https://static.example.com"),
+                Some(1000),
+            );
+            // Unknown logs return None (not 0!) so the watcher falls back to fresh start.
+            assert_eq!(mgr.get_tree_size("https://unknown.example.com"), None);
+        }
+
+        cleanup_file(&path);
     }
 
     #[tokio::test]

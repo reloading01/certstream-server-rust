@@ -47,6 +47,12 @@ pub struct LogHealth {
     circuit_fast: AtomicU8,
 }
 
+impl Default for LogHealth {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl LogHealth {
     const MIN_BACKOFF_MS: u64 = 1000;
     const MAX_BACKOFF_MS: u64 = 60000;
@@ -166,7 +172,9 @@ impl LogHealth {
         self.inner.lock().status
     }
 
-    #[allow(dead_code)]
+    /// Test-only inspector. Production code observes circuit transitions via
+    /// the `should_attempt()` fast path and the `LogHealth::status()` summary.
+    #[cfg(test)]
     pub fn circuit_state(&self) -> CircuitState {
         self.inner.lock().circuit
     }
@@ -222,6 +230,7 @@ pub async fn run_watcher_with_cache(log: CtLog, ctx: WatcherContext) {
         dedup,
         rate_limiter,
         streams,
+        issuer_cache: _,  // RFC6962 watcher doesn't use the issuer cache (no /issuer/ endpoint).
     } = ctx;
     use backon::{ExponentialBuilder, Retryable};
     use serde::Deserialize;
@@ -254,12 +263,29 @@ pub async fn run_watcher_with_cache(log: CtLog, ctx: WatcherContext) {
     let poll_interval = Duration::from_millis(config.poll_interval_ms);
     let timeout = Duration::from_secs(config.request_timeout_secs);
 
+    // Per-watcher reusable JSON parse buffer. Pre-1.5.0 every get-entries
+    // response did `let mut v = b.to_vec();` — a fresh ~1.5 MB allocation
+    // per poll (256 entries × ~5 KB). Reusing the buffer keeps the capacity
+    // stable after the first response and turns the hottest transient
+    // allocator (heap profile: ~16 MB across 30 watchers) into a one-time
+    // amortised cost.
+    #[cfg(feature = "simd")]
+    let mut json_buf: Vec<u8> = Vec::new();
+
     // Issue #3: Pre-register metric counter handles — eliminates one String allocation
     // per certificate in the hot loop. The handle captures the label at startup time.
     let counter_messages = metrics::counter!("certstream_messages_sent", "log" => log_name.clone());
     let counter_parse_failures = metrics::counter!("certstream_parse_failures", "log" => log_name.clone());
 
     info!(log = %log_name, url = %base_url, "starting watcher");
+
+    // P1 fix: RFC6962 tree_size rollback guard, parallel to static_ct.rs's
+    // (which #5 introduced). RFC6962 STH tree_size is monotonically
+    // non-decreasing; a shrinking value means operator bug, replica
+    // inconsistency, or MITM. Pre-1.5.0 RFC6962 silently followed any
+    // tree_size — only static-CT had the guard. Re-seed from persisted state
+    // so the protection survives restarts.
+    let mut high_water_tree_size: u64 = state_manager.get_tree_size(&base_url).unwrap_or(0);
 
     let mut current_index = if let Some(saved_index) = state_manager.get_index(&base_url) {
         info!(log = %log.description, saved_index = saved_index, "resuming from saved state");
@@ -310,11 +336,25 @@ pub async fn run_watcher_with_cache(log: CtLog, ctx: WatcherContext) {
             warn!(log = %log.description, errors = health.total_errors(), "log is unhealthy, waiting for recovery check");
             sleep(Duration::from_secs(config.health_check_interval_secs)).await;
 
+            // P1 fix: pre-1.5.0 this matched only Ok(_) vs Err(_), so a 5xx
+            // or 429 response marked the log healthy and immediately entered
+            // the get-entries loop — which failed again, oscillating between
+            // healthy and unhealthy without ever backing off properly.
             let url = format!("{}/ct/v1/get-sth", base_url);
             match client.get(&url).timeout(timeout).send().await {
-                Ok(_) => {
+                Ok(resp) if resp.status().is_success() => {
                     health.record_success(config.healthy_threshold);
                     info!(log = %log.description, "health check passed, resuming");
+                }
+                Ok(resp) => {
+                    health.record_failure(config.unhealthy_threshold);
+                    warn!(
+                        log = %log.description,
+                        status = %resp.status(),
+                        "health check returned non-success, staying disabled"
+                    );
+                    metrics::counter!("certstream_log_health_checks_failed").increment(1);
+                    continue;
                 }
                 Err(e) => {
                     health.record_failure(config.unhealthy_threshold);
@@ -358,12 +398,35 @@ pub async fn run_watcher_with_cache(log: CtLog, ctx: WatcherContext) {
             }
         };
 
+        // RFC6962 rollback guard (parity with static_ct).
+        if tree_size < high_water_tree_size {
+            warn!(
+                log = %log.description,
+                got = tree_size,
+                high_water = high_water_tree_size,
+                "tree_size went backwards; refusing to advance"
+            );
+            metrics::counter!(
+                "certstream_rfc6962_tree_size_rollbacks",
+                "log" => log_name.clone()
+            )
+            .increment(1);
+            health.record_failure(config.unhealthy_threshold);
+            sleep(health.get_backoff()).await;
+            continue;
+        }
+        high_water_tree_size = tree_size;
+
         if current_index >= tree_size {
             sleep(poll_interval).await;
             continue;
         }
 
-        let end = (current_index + config.batch_size).min(tree_size - 1);
+        // Defensive: tree_size > current_index ≥ 0 here, so tree_size ≥ 1 and
+        // `tree_size - 1` never underflows. Use saturating_sub anyway so any
+        // future regression saturates at 0 instead of wrapping to u64::MAX.
+        let end_inclusive = tree_size.saturating_sub(1);
+        let end = (current_index + config.batch_size).min(end_inclusive);
         let entries_url = format!(
             "{}/ct/v1/get-entries?start={}&end={}",
             base_url, current_index, end
@@ -371,7 +434,7 @@ pub async fn run_watcher_with_cache(log: CtLog, ctx: WatcherContext) {
 
         // Respect per-operator rate limit before making request
         if let Some(ref limiter) = rate_limiter {
-            limiter.lock().await.tick().await;
+            limiter.tick().await;
         }
 
         match client.get(&entries_url).timeout(timeout).send().await {
@@ -396,19 +459,23 @@ pub async fn run_watcher_with_cache(log: CtLog, ctx: WatcherContext) {
                     continue;
                 }
 
-                // Issue #14: simd-json for 2–4× faster deserialization of the entries
+                // Issue #14: simd-json for 2-4× faster deserialization of the entries
                 // response — the largest JSON payload in the hot path. simd_json::from_slice
-                // requires &mut [u8], so we collect bytes first then parse in-place.
+                // requires &mut [u8] (it scribbles over the buffer for string escaping),
+                // so we copy into the per-watcher reusable Vec. The reusable buffer is
+                // the 1.5.0 fix for "16 MB transient" in the heap profile — capacity is
+                // amortised across polls instead of `to_vec()`-ing a fresh allocation
+                // every request.
                 #[cfg(feature = "simd")]
-                let parse_result: Result<EntriesResponse, String> = resp
-                    .bytes()
-                    .await
-                    .map_err(|e| e.to_string())
-                    .and_then(|b| {
-                        let mut v = b.to_vec();
-                        simd_json::from_slice::<EntriesResponse>(&mut v)
+                let parse_result: Result<EntriesResponse, String> = match resp.bytes().await {
+                    Ok(b) => {
+                        json_buf.clear();
+                        json_buf.extend_from_slice(&b);
+                        simd_json::from_slice::<EntriesResponse>(&mut json_buf)
                             .map_err(|e| e.to_string())
-                    });
+                    }
+                    Err(e) => Err(e.to_string()),
+                };
                 #[cfg(not(feature = "simd"))]
                 let parse_result: Result<EntriesResponse, String> =
                     resp.json::<EntriesResponse>().await.map_err(|e| e.to_string());

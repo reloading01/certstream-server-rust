@@ -1,0 +1,46 @@
+# 12-hour DUAL soak: two independent containers — one idle, one under 100-WS
+# load — for direct apples-to-apples comparison of memory drift, GC behaviour,
+# and feature stability.
+#
+# Usage:
+#   docker compose -f docker-compose.dual-soak.yml up -d
+#   bash soak/start-load.sh                       # spawns the 100 WS clients
+#   bash soak/dual-snapshot.sh                    # one-shot health + metric capture
+#
+# Restart policy: "no" so any panic surfaces visibly; the in-process
+# supervisor handles per-watcher panic recovery on its own.
+
+services:
+  certstream-idle:
+    image: certstream-server-rust-certstream-server-rust:latest
+    container_name: certstream-idle
+    ports:
+      - "18080:8080"
+    environment:
+      - CERTSTREAM_HOST=0.0.0.0
+      - CERTSTREAM_LOG_LEVEL=info
+    restart: "no"
+    healthcheck:
+      # Accept healthy OR degraded — one slow upstream log shouldn't take
+      # the container down.
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/health/deep | grep -qE '\"status\":\"(healthy|degraded)\"'"]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  certstream-loaded:
+    image: certstream-server-rust-certstream-server-rust:latest
+    container_name: certstream-loaded
+    ports:
+      - "18081:8080"
+    environment:
+      - CERTSTREAM_HOST=0.0.0.0
+      - CERTSTREAM_LOG_LEVEL=info
+    restart: "no"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/health/deep | grep -qE '\"status\":\"(healthy|degraded)\"'"]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+      start_period: 20s

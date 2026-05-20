@@ -4,7 +4,6 @@ use flate2::read::GzDecoder;
 use reqwest::Client;
 use std::borrow::Cow;
 use std::fmt::Write;
-use std::io::Read;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, error, info, warn};
@@ -14,6 +13,12 @@ use super::{broadcast_cert, build_cached_cert, parse_certificate, CtLog, Watcher
 use crate::models::{CertificateData, CertificateMessage, ChainCert, Source};
 
 /// A parsed static CT checkpoint.
+///
+/// `origin` and `root_hash` are populated by the parser and asserted in tests.
+/// Production code currently only consumes `tree_size` for catch-up; the other
+/// two are retained because the planned checkpoint-signature-verification path
+/// needs both (the signed note covers `<origin>\n<tree_size>\n<root_hash>`).
+/// They are intentionally not pruned even though prod is silent on them today.
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct Checkpoint {
@@ -23,6 +28,11 @@ pub struct Checkpoint {
 }
 
 /// A single entry parsed from a tile/data tile.
+///
+/// `entry_type` (0=x509, 1=precert) is the raw wire value. Hot path uses the
+/// derived `is_precert` boolean, but `entry_type` is exposed so callers /
+/// tests can detect spec-forward values (>1) the day the static-ct-api adds
+/// new entry kinds, without a parser change.
 #[derive(Debug)]
 #[allow(dead_code)]
 pub struct TileLeaf {
@@ -89,6 +99,11 @@ impl IssuerCache {
 
     pub fn insert(&self, fingerprint: [u8; 32], data: Bytes) {
         self.cache.insert(fingerprint, data);
+    }
+
+    #[allow(dead_code)]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 
     pub fn len(&self) -> usize {
@@ -401,13 +416,42 @@ pub async fn fetch_issuer(
     }
 }
 
-/// Decompress gzipped tile data. Returns borrowed data if not gzipped.
+/// Hard ceiling on a single decompressed tile. A static-CT tile is at most
+/// 256 entries × ~(8 KB cert + small chain) ≈ 2-3 MiB in normal traffic.
+/// 16 MiB gives ~5× headroom for chain-heavy precerts; anything larger is
+/// either a misconfigured operator or a gzip bomb. We refuse it.
+const MAX_DECOMPRESSED_TILE_BYTES: u64 = 16 * 1024 * 1024;
+
+/// Decompress gzipped tile data, capped at [`MAX_DECOMPRESSED_TILE_BYTES`].
+/// Returns borrowed data if not gzipped, or `Cow::Borrowed(&[])` if the
+/// decompressed stream would exceed the cap (caller must check the slice's
+/// length against the original `data.len()` if it wants to discriminate).
+///
+/// Pre-1.5.0 used `read_to_end` with no cap — a hostile or buggy CDN could
+/// serve a small gzip stream that expanded to gigabytes and OOM'd the
+/// process.
 pub fn decompress_tile(data: &[u8]) -> Cow<'_, [u8]> {
+    use std::io::Read as _;
     if data.len() >= 2 && data[0] == 0x1f && data[1] == 0x8b {
-        let mut decoder = GzDecoder::new(data);
+        let decoder = GzDecoder::new(data);
+        let mut bounded = decoder.take(MAX_DECOMPRESSED_TILE_BYTES + 1);
         let mut decompressed = Vec::new();
-        match decoder.read_to_end(&mut decompressed) {
-            Ok(_) => Cow::Owned(decompressed),
+        match bounded.read_to_end(&mut decompressed) {
+            Ok(_) => {
+                if decompressed.len() as u64 > MAX_DECOMPRESSED_TILE_BYTES {
+                    warn!(
+                        decompressed_size = decompressed.len(),
+                        cap = MAX_DECOMPRESSED_TILE_BYTES,
+                        "decompressed tile exceeds cap; rejecting"
+                    );
+                    metrics::counter!("certstream_static_ct_decompress_oversize").increment(1);
+                    // Empty Cow makes parse_tile_leaves return [] and the
+                    // caller treats it as a fetch failure → backoff.
+                    Cow::Owned(Vec::new())
+                } else {
+                    Cow::Owned(decompressed)
+                }
+            }
             Err(_) => Cow::Borrowed(data),
         }
     } else {
@@ -430,6 +474,7 @@ pub async fn run_static_ct_watcher(log: CtLog, ctx: WatcherContext) {
         dedup,
         rate_limiter,
         streams,
+        issuer_cache: shared_issuer_cache,
     } = ctx;
     use tokio::time::sleep;
 
@@ -450,7 +495,12 @@ pub async fn run_static_ct_watcher(log: CtLog, ctx: WatcherContext) {
     });
 
     let health = Arc::new(LogHealth::new());
-    let issuer_cache = Arc::new(IssuerCache::new());
+    // P1 fix: use the SHARED issuer cache from WatcherContext instead of
+    // allocating a fresh per-watcher cache. With 55 static-CT logs this
+    // was up to 55 × 10K entries (~500 MiB worst case); now a single
+    // 10K-entry cache amortises issuer DERs across all logs of the same
+    // operator (and across different operators sharing a root).
+    let issuer_cache: Arc<IssuerCache> = shared_issuer_cache;
     let poll_interval = Duration::from_millis(config.poll_interval_ms);
     let timeout = Duration::from_secs(config.request_timeout_secs);
 
@@ -468,7 +518,11 @@ pub async fn run_static_ct_watcher(log: CtLog, ctx: WatcherContext) {
     // A static-CT log's tree_size must be monotonically non-decreasing; if the
     // server returns a smaller value we assume an operator bug or transient
     // serving inconsistency, log it, and refuse to advance.
-    let mut high_water_tree_size: u64 = 0;
+    //
+    // Seed from persisted state on resume so the rollback guard survives
+    // restarts — otherwise the first poll after a restart would silently
+    // accept any tree_size, including one smaller than what we had before.
+    let mut high_water_tree_size: u64 = state_manager.get_tree_size(&base_url).unwrap_or(0);
 
     let mut current_index = if let Some(saved_index) = state_manager.get_index(&base_url) {
         info!(log = %log.description, saved_index = saved_index, "resuming from saved state");
@@ -649,7 +703,7 @@ pub async fn run_static_ct_watcher(log: CtLog, ctx: WatcherContext) {
 
             // Respect per-operator rate limit before making request
             if let Some(ref limiter) = rate_limiter {
-                limiter.lock().await.tick().await;
+                limiter.tick().await;
             }
 
             match client.get(&url).timeout(timeout).send().await {
@@ -714,22 +768,46 @@ pub async fn run_static_ct_watcher(log: CtLog, ctx: WatcherContext) {
                                 0
                             };
 
-                            // H-3 fix: collect all unique fingerprints across the tile slice and
-                            // pre-warm the issuer cache with a single concurrent fetch round,
-                            // replacing the original O(n*m) sequential-await pattern.
+                            // Pre-warm the issuer cache for unique chain fingerprints
+                            // across this tile slice. Two safeties on top of the H-3 fix:
+                            //   1. Concurrency cap (`MAX_INFLIGHT_ISSUER_FETCHES`) so a
+                            //      tile with a huge chain count can't fan out into 65K
+                            //      concurrent HTTP requests to the operator's /issuer/
+                            //      endpoint — that bypasses the per-operator rate limiter
+                            //      and triggers IP bans / 429-storms.
+                            //   2. Per-fingerprint cache skip: only fetch what we don't
+                            //      already have, since the cache is now shared across
+                            //      all watchers and common roots (R10, ISRG X1) cache
+                            //      across logs.
                             {
+                                use futures::stream::{self, StreamExt};
                                 use std::collections::HashSet;
-                                let unique_fps: HashSet<&[u8; 32]> = leaves
+                                const MAX_INFLIGHT_ISSUER_FETCHES: usize = 16;
+
+                                let unique_fps: HashSet<[u8; 32]> = leaves
                                     .iter()
                                     .skip(offset_in_tile)
-                                    .flat_map(|l| l.chain_fingerprints.iter())
+                                    .flat_map(|l| l.chain_fingerprints.iter().copied())
+                                    .filter(|fp| issuer_cache.get(fp).is_none())
                                     .collect();
                                 if !unique_fps.is_empty() {
-                                    let fetch_futs: Vec<_> = unique_fps
-                                        .into_iter()
-                                        .map(|fp| fetch_issuer(&client, &base_url, fp, &issuer_cache, timeout))
-                                        .collect();
-                                    futures::future::join_all(fetch_futs).await;
+                                    stream::iter(unique_fps)
+                                        .for_each_concurrent(MAX_INFLIGHT_ISSUER_FETCHES, |fp| {
+                                            let client = client.clone();
+                                            let base_url = base_url.clone();
+                                            let issuer_cache = issuer_cache.clone();
+                                            async move {
+                                                let _ = fetch_issuer(
+                                                    &client,
+                                                    &base_url,
+                                                    &fp,
+                                                    &issuer_cache,
+                                                    timeout,
+                                                )
+                                                .await;
+                                            }
+                                        })
+                                        .await;
                                 }
                             }
 
@@ -776,9 +854,11 @@ pub async fn run_static_ct_watcher(log: CtLog, ctx: WatcherContext) {
                                 let seen = chrono::Utc::now().timestamp_millis() as f64 / 1000.0;
                                 let mut chain = Vec::new();
                                 for fp in &leaf.chain_fingerprints {
-                                    if let Some(issuer_der) =
-                                        fetch_issuer(&client, &base_url, fp, &issuer_cache, timeout)
-                                            .await
+                                    // Pre-warm above already issued a concurrent fetch round
+                                    // populating the cache; here we just read it. If the
+                                    // pre-warm failed for this fp, we skip rather than
+                                    // re-issuing a serial network round-trip on the hot path.
+                                    if let Some(issuer_der) = issuer_cache.get(fp)
                                         && let Some(issuer_cert) = parse_certificate(&issuer_der, false)
                                     {
                                         chain.push(ChainCert {
@@ -999,6 +1079,76 @@ mod tests {
         cache.insert(fp, Bytes::from(vec![4, 5, 6]));
         assert_eq!(cache.len(), 1);
         assert_eq!(&cache.get(&fp).unwrap()[..], &[4, 5, 6]);
+    }
+
+    /// Regression for #6: pre-1.5.0 each leaf in the per-tile loop went
+    /// through `fetch_issuer(...).await` even after the pre-warm `join_all`
+    /// populated the cache. The per-leaf path now reads
+    /// `issuer_cache.get(fp)` directly, so for any one fingerprint we hit
+    /// the network *at most once* per cache lifetime.
+    #[tokio::test]
+    async fn issuer_fetch_hits_network_at_most_once_per_fingerprint() {
+        use std::net::SocketAddr;
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr: SocketAddr = listener.local_addr().unwrap();
+        let counter = Arc::new(AtomicU32::new(0));
+        let counter_clone = counter.clone();
+        let server = tokio::spawn(async move {
+            loop {
+                let (mut sock, _) = match listener.accept().await {
+                    Ok(p) => p,
+                    Err(_) => break,
+                };
+                let counter = counter_clone.clone();
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 1024];
+                    let _ = sock.read(&mut buf).await;
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    let body = b"\x30\x82\x00\x10der";
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = sock.write_all(resp.as_bytes()).await;
+                    let _ = sock.write_all(body).await;
+                    let _ = sock.shutdown().await;
+                });
+            }
+        });
+
+        let base = format!("http://{addr}");
+        let client = reqwest::Client::new();
+        let cache = Arc::new(IssuerCache::new());
+        let fp = [0xab; 32];
+
+        let v1 = fetch_issuer(&client, &base, &fp, &cache, std::time::Duration::from_secs(2)).await;
+        assert!(v1.is_some(), "first fetch should succeed");
+        assert_eq!(counter.load(Ordering::SeqCst), 1, "exactly one HTTP hit so far");
+
+        let v2 = fetch_issuer(&client, &base, &fp, &cache, std::time::Duration::from_secs(2)).await;
+        assert!(v2.is_some(), "cached fetch must return Some");
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            1,
+            "second fetch_issuer with cached fp must NOT hit the network — \
+             pre-1.5.0 the per-leaf hot loop burned an HTTP request per chain \
+             entry per leaf even when the cache had the value"
+        );
+
+        let fp2 = [0xcd; 32];
+        let _ =
+            fetch_issuer(&client, &base, &fp2, &cache, std::time::Duration::from_secs(2)).await;
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            2,
+            "new fingerprint must hit the network exactly once"
+        );
+
+        server.abort();
     }
 
     #[test]

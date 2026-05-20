@@ -123,6 +123,17 @@ impl ConnectionLimiter {
     }
 }
 
+/// Constant-time check that `target` matches some element of `list`.
+/// Length mismatch short-circuits per entry (the length itself is not secret),
+/// but byte comparison runs in fixed time so an attacker can't distinguish
+/// near-matches via response timing.
+fn ct_contains(list: &[String], target: &[u8]) -> bool {
+    list.iter().any(|stored| {
+        let sb = stored.as_bytes();
+        sb.len() == target.len() && sb.ct_eq(target).into()
+    })
+}
+
 #[derive(Clone)]
 pub struct AuthMiddleware {
     hot_reload: Option<Arc<HotReloadManager>>,
@@ -151,18 +162,11 @@ impl AuthMiddleware {
             return true;
         }
 
-        match token {
-            Some(t) => {
-                let token_value = t.strip_prefix("Bearer ").unwrap_or(t);
-                let token_bytes = token_value.as_bytes();
-                config.tokens.iter().any(|stored| {
-                    let stored_bytes = stored.as_bytes();
-                    stored_bytes.len() == token_bytes.len()
-                        && stored_bytes.ct_eq(token_bytes).into()
-                })
-            }
-            None => false,
-        }
+        let Some(t) = token else { return false };
+        let token_value = t.strip_prefix("Bearer ").unwrap_or(t);
+        let token_bytes = token_value.as_bytes();
+
+        ct_contains(&config.tokens, token_bytes)
     }
 
     pub fn is_enabled(&self) -> bool {
@@ -203,12 +207,11 @@ pub async fn rate_limit_middleware(
     request: Request<Body>,
     next: Next,
 ) -> Response {
-    let token = request
-        .headers()
-        .get("Authorization")
-        .and_then(|v| v.to_str().ok());
-
-    match limiter.check(addr.ip(), token) {
+    // Single-tier rate limit keyed by source IP. Auth status doesn't
+    // influence this: a malicious authenticated client still hits the
+    // same per-IP ceiling as anyone else. Tier-based throttling was
+    // removed in 1.5.0 — it added complexity without a clear use case.
+    match limiter.check(addr.ip()) {
         RateLimitResult::Allowed => next.run(request).await,
         RateLimitResult::Rejected { retry_after_ms } => {
             let mut response = (
@@ -216,10 +219,10 @@ pub async fn rate_limit_middleware(
                 format!("Rate limit exceeded. Retry after {}ms", retry_after_ms),
             )
                 .into_response();
-            response.headers_mut().insert(
-                "Retry-After",
-                ((retry_after_ms / 1000).max(1)).to_string().parse().unwrap(),
-            );
+            let secs = (retry_after_ms / 1000).max(1).to_string();
+            if let Ok(hv) = secs.parse() {
+                response.headers_mut().insert("Retry-After", hv);
+            }
             response
         }
     }
@@ -248,8 +251,6 @@ mod tests {
             enabled,
             tokens: tokens.into_iter().map(String::from).collect(),
             header_name: "Authorization".to_string(),
-            standard_tokens: Vec::new(),
-            premium_tokens: Vec::new(),
         }
     }
 

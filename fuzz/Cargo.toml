@@ -1,0 +1,28 @@
+[package]
+name = "certstream-server-rust-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.certstream-server-rust]
+path = ".."
+
+[[bin]]
+name = "parse_certificate"
+path = "fuzz_targets/parse_certificate.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "parse_tile_leaves"
+path = "fuzz_targets/parse_tile_leaves.rs"
+test = false
+doc = false
+bench = false

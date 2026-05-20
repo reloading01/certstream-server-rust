@@ -208,9 +208,12 @@ flowchart LR
                     <p>
                         Every certificate is serialized exactly once using <code>simd-json</code> (SIMD-accelerated, enabled by default) into three pre-built <code>Bytes</code> payloads
                         (<code>full</code>, <code>lite</code>, <code>domains_only</code>), then wrapped in an <code>Arc&lt;PreSerializedMessage&gt;</code>.
-                        Each subscriber receives only a pointer clone — no re-serialization, no extra heap allocation per client.
-                        Shared state uses lock-free <code>DashMap</code> throughout; there are no global read/write mutexes in the hot path.
-                        The result is a flat ~150 MB RSS footprint under sustained load, stable over time.
+                        Each subscriber receives a pointer clone and a zero-copy <code>Utf8Bytes</code> Text frame — no re-serialization,
+                        no per-client JSON re-encoding (1.5.0). When no clients are connected the serialize step is skipped entirely
+                        via a <code>receiver_count() == 0</code> guard. Shared state uses lock-free <code>DashMap</code> throughout;
+                        there are no global read/write mutexes in the hot path.
+                        The result is a ~118 MiB stable RSS footprint under load (100 WebSocket clients, 10-minute plateau),
+                        with a ±5 MiB swing — measured against the default config.
                     </p>
                 </div>
             </div>
