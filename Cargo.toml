@@ -72,6 +72,11 @@ lto = "fat"
 codegen-units = 1
 strip = true
 opt-level = 3
+# Explicit: panic=unwind retained because main.rs:498 uses
+# futures::FutureExt::catch_unwind to recover from worker panics in the CT
+# poll loop. Switching to panic=abort would silently break that recovery
+# path. Revisit when the catch_unwind site is refactored.
+panic = "unwind"
 
 [profile.release.build-override]
 opt-level = 3
