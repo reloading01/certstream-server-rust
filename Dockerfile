@@ -2,7 +2,7 @@
 FROM rust:1.95-alpine AS builder
 ARG TARGETPLATFORM
 
-RUN apk add --no-cache musl-dev pkgconf openssl-dev openssl-libs-static make gcc
+RUN apk add --no-cache musl-dev pkgconf openssl-dev openssl-libs-static
 
 WORKDIR /app
 COPY Cargo.toml Cargo.lock* ./
@@ -28,12 +28,6 @@ FROM alpine:3.21
 RUN apk add --no-cache ca-certificates curl
 
 COPY --from=builder /usr/local/bin/certstream-server-rust /usr/local/bin/
-
-# mimalloc tuning. Defaults are already aggressive about returning memory
-# to the OS (mi_option_purge_delay = 10ms), which is what we want for an
-# RSS-sensitive monitoring service. MIMALLOC_VERBOSE=0 suppresses init noise
-# on stderr; flip to 1 for diagnostics.
-ENV MIMALLOC_VERBOSE=0
 
 EXPOSE 8080
 

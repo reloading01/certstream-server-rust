@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info};
 
 use super::{
     broadcast_cert, build_cached_cert, parse_leaf_input_with_options, CtLog, ParseOptions,
@@ -345,7 +345,10 @@ pub async fn run_watcher_with_cache(log: CtLog, ctx: WatcherContext) {
         }
 
         if !health.is_healthy() {
-            warn!(log = %log.description, errors = health.total_errors(), "log is unhealthy, waiting for recovery check");
+            // Upstream-transient state. Status is exposed via /health/deep and the
+            // certstream_log_health_checks_failed counter; the per-iteration log
+            // line only adds value to live debugging, so emit at debug.
+            debug!(log = %log.description, errors = health.total_errors(), "log is unhealthy, waiting for recovery check");
             sleep(Duration::from_secs(config.health_check_interval_secs)).await;
 
             // P1 fix: pre-1.5.0 this matched only Ok(_) vs Err(_), so a 5xx
@@ -360,7 +363,7 @@ pub async fn run_watcher_with_cache(log: CtLog, ctx: WatcherContext) {
                 }
                 Ok(resp) => {
                     health.record_failure(config.unhealthy_threshold);
-                    warn!(
+                    debug!(
                         log = %log.description,
                         status = %resp.status(),
                         "health check returned non-success, staying disabled"
@@ -370,7 +373,7 @@ pub async fn run_watcher_with_cache(log: CtLog, ctx: WatcherContext) {
                 }
                 Err(e) => {
                     health.record_failure(config.unhealthy_threshold);
-                    warn!(log = %log.description, error = %e, "health check failed, staying disabled");
+                    debug!(log = %log.description, error = %e, "health check failed, staying disabled");
                     metrics::counter!("certstream_log_health_checks_failed").increment(1);
                     continue;
                 }
@@ -384,10 +387,10 @@ pub async fn run_watcher_with_cache(log: CtLog, ctx: WatcherContext) {
                     let status = resp.status();
                     if status.as_u16() == 429 {
                         health.record_rate_limit(config.unhealthy_threshold);
-                        warn!(log = %log.description, "rate limited on get-sth, backing off");
+                        debug!(log = %log.description, "rate limited on get-sth, backing off");
                     } else {
                         health.record_failure(config.unhealthy_threshold);
-                        warn!(log = %log.description, status = %status, "get-sth returned error");
+                        debug!(log = %log.description, status = %status, "get-sth returned error");
                     }
                     sleep(health.get_backoff()).await;
                     continue;
@@ -396,7 +399,7 @@ pub async fn run_watcher_with_cache(log: CtLog, ctx: WatcherContext) {
                     Ok(sth) => sth.tree_size,
                     Err(e) => {
                         health.record_failure(config.unhealthy_threshold);
-                        warn!(log = %log.description, error = %e, "failed to parse tree size");
+                        debug!(log = %log.description, error = %e, "failed to parse tree size");
                         sleep(health.get_backoff()).await;
                         continue;
                     }
@@ -404,15 +407,18 @@ pub async fn run_watcher_with_cache(log: CtLog, ctx: WatcherContext) {
             }
             Err(e) => {
                 health.record_failure(config.unhealthy_threshold);
-                warn!(log = %log.description, error = %e, "failed to get tree size");
+                debug!(log = %log.description, error = %e, "failed to get tree size");
                 sleep(health.get_backoff()).await;
                 continue;
             }
         };
 
-        // RFC6962 rollback guard (parity with static_ct).
+        // RFC6962 rollback guard (parity with static_ct). Logged at debug —
+        // some replicas flap between adjacent tree_size values, and the
+        // certstream_rfc6962_tree_size_rollbacks metric already tracks each
+        // occurrence for alerting.
         if tree_size < high_water_tree_size {
-            warn!(
+            debug!(
                 log = %log.description,
                 got = tree_size,
                 high_water = high_water_tree_size,
@@ -455,7 +461,7 @@ pub async fn run_watcher_with_cache(log: CtLog, ctx: WatcherContext) {
                     let status = resp.status();
                     if status.as_u16() == 429 {
                         health.record_rate_limit(config.unhealthy_threshold);
-                        warn!(log = %log.description, "rate limited by CT log, backing off 30s");
+                        debug!(log = %log.description, "rate limited by CT log, backing off 30s");
                     } else if status.as_u16() == 400 {
                         // Entries not yet available — skip ahead to tree_size
                         debug!(log = %log.description, start = current_index, end = end,
@@ -465,7 +471,7 @@ pub async fn run_watcher_with_cache(log: CtLog, ctx: WatcherContext) {
                         continue;
                     } else {
                         health.record_failure(config.unhealthy_threshold);
-                        warn!(log = %log.description, status = %status, "CT log returned error");
+                        debug!(log = %log.description, status = %status, "CT log returned error");
                     }
                     sleep(health.get_backoff()).await;
                     continue;
@@ -500,7 +506,10 @@ pub async fn run_watcher_with_cache(log: CtLog, ctx: WatcherContext) {
                         // M-2 fix: an empty response must not advance the index —
                         // that would permanently skip one entry per occurrence.
                         if count == 0 {
-                            warn!(log = %log_name, "CT log returned empty entries response, retrying");
+                            // Empty response means the log has no new entries past current_index.
+                            // Expected steady-state when a log is caught up; logged at debug to
+                            // avoid drowning the warn channel during normal idle polling.
+                            debug!(log = %log_name, "CT log returned empty entries response, retrying");
                             sleep(poll_interval).await;
                             continue;
                         }
@@ -572,14 +581,14 @@ pub async fn run_watcher_with_cache(log: CtLog, ctx: WatcherContext) {
                     }
                     Err(ref e) => {
                         health.record_failure(config.unhealthy_threshold);
-                        warn!(log = %log.description, error = %e, "failed to parse entries");
+                        debug!(log = %log.description, error = %e, "failed to parse entries");
                         sleep(health.get_backoff()).await;
                     }
                 }
             }
             Err(e) => {
                 health.record_failure(config.unhealthy_threshold);
-                warn!(log = %log.description, error = %e, "failed to fetch entries");
+                debug!(log = %log.description, error = %e, "failed to fetch entries");
                 sleep(health.get_backoff()).await;
             }
         }

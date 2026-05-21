@@ -403,7 +403,7 @@ pub async fn fetch_issuer(
                 Some(bytes)
             }
             Err(e) => {
-                warn!(url = %url, error = %e, "failed to read issuer response body");
+                debug!(url = %url, error = %e, "failed to read issuer response body");
                 None
             }
         },
@@ -541,35 +541,57 @@ pub async fn run_static_ct_watcher(log: CtLog, ctx: WatcherContext) {
         info!(log = %log.description, saved_index = saved_index, "resuming from saved state");
         saved_index
     } else {
-        match client.get(&checkpoint_url).timeout(timeout).send().await {
-            Ok(resp) => match resp.text().await {
-                Ok(text) => match parse_checkpoint(&text, &expected_origin) {
-                    Some(cp) => {
-                        let start = cp.tree_size.saturating_sub(256);
-                        info!(log = %log.description, tree_size = cp.tree_size, starting_at = start, "starting fresh (static CT)");
-                        start
-                    }
-                    None => {
-                        error!(log = %log.description, "failed to parse initial checkpoint, exiting watcher");
+        // Bounded exponential retry on the initial checkpoint fetch. A brand-new
+        // log can return malformed data on first contact (e.g. an empty body
+        // before the operator finishes initialization); a single-shot failure
+        // would have killed the watcher permanently for the lifetime of the
+        // process. Mirror the retry semantics that watcher.rs uses for get-sth.
+        let mut attempt: u32 = 0;
+        let max_attempts = config.retry_max_attempts.max(1);
+        let mut delay_ms = config.retry_initial_delay_ms;
+        let max_delay_ms = config.retry_max_delay_ms;
+        let initial = loop {
+            attempt += 1;
+            let outcome: Result<u64, String> = match client.get(&checkpoint_url).timeout(timeout).send().await {
+                Ok(resp) => match resp.text().await {
+                    Ok(text) => match parse_checkpoint(&text, &expected_origin) {
+                        Some(cp) => Ok(cp.tree_size),
+                        None => Err("malformed checkpoint".to_string()),
+                    },
+                    Err(e) => Err(format!("read body: {e}")),
+                },
+                Err(e) => Err(format!("send: {e}")),
+            };
+            match outcome {
+                Ok(size) => break Some(size),
+                Err(reason) => {
+                    if attempt >= max_attempts {
+                        error!(
+                            log = %log.description,
+                            attempts = attempt,
+                            error = %reason,
+                            "initial checkpoint fetch failed after retries, exiting watcher"
+                        );
                         metrics::counter!("certstream_static_ct_checkpoint_errors").increment(1);
                         metrics::counter!("certstream_worker_init_failures").increment(1);
-                        return;
+                        break None;
                     }
-                },
-                Err(e) => {
-                    error!(log = %log.description, error = %e, "failed to read initial checkpoint response, exiting watcher");
-                    metrics::counter!("certstream_static_ct_checkpoint_errors").increment(1);
-                    metrics::counter!("certstream_worker_init_failures").increment(1);
-                    return;
+                    debug!(
+                        log = %log.description,
+                        attempt,
+                        max_attempts,
+                        error = %reason,
+                        "initial checkpoint fetch failed, retrying"
+                    );
+                    sleep(Duration::from_millis(delay_ms)).await;
+                    delay_ms = (delay_ms * 2).min(max_delay_ms);
                 }
-            },
-            Err(e) => {
-                error!(log = %log.description, error = %e, "failed to fetch initial checkpoint, exiting watcher");
-                metrics::counter!("certstream_static_ct_checkpoint_errors").increment(1);
-                metrics::counter!("certstream_worker_init_failures").increment(1);
-                return;
             }
-        }
+        };
+        let Some(tree_size) = initial else { return };
+        let start = tree_size.saturating_sub(256);
+        info!(log = %log.description, tree_size, starting_at = start, "starting fresh (static CT)");
+        start
     };
 
     loop {
@@ -589,7 +611,9 @@ pub async fn run_static_ct_watcher(log: CtLog, ctx: WatcherContext) {
         // eliminating the previous double-fetch on recovery.
         let was_unhealthy = !health.is_healthy();
         if was_unhealthy {
-            warn!(log = %log.description, errors = health.total_errors(), "static CT log is unhealthy, waiting for recovery");
+            // Status surfaced via /health/deep + the certstream_log_health_*
+            // counters; the per-iteration log line is debug-only.
+            debug!(log = %log.description, errors = health.total_errors(), "static CT log is unhealthy, waiting for recovery");
             sleep(Duration::from_secs(config.health_check_interval_secs)).await;
         }
 
@@ -605,7 +629,7 @@ pub async fn run_static_ct_watcher(log: CtLog, ctx: WatcherContext) {
                         .map(|secs| secs.saturating_mul(1_000))
                         .unwrap_or(LogHealth::RATE_LIMIT_BACKOFF_MS);
                     health.record_rate_limit_with_ms(config.unhealthy_threshold, retry_after_ms);
-                    warn!(log = %log.description, retry_after_ms, "rate limited on checkpoint fetch, backing off");
+                    debug!(log = %log.description, retry_after_ms, "rate limited on checkpoint fetch, backing off");
                     metrics::counter!("certstream_static_ct_checkpoint_errors").increment(1);
                     sleep(health.get_backoff()).await;
                     continue;
@@ -615,7 +639,7 @@ pub async fn run_static_ct_watcher(log: CtLog, ctx: WatcherContext) {
                         metrics::counter!("certstream_log_health_checks_failed").increment(1);
                     }
                     health.record_failure(config.unhealthy_threshold);
-                    warn!(log = %log.description, %status, "checkpoint fetch returned non-success");
+                    debug!(log = %log.description, %status, "checkpoint fetch returned non-success");
                     metrics::counter!("certstream_static_ct_checkpoint_errors").increment(1);
                     sleep(health.get_backoff()).await;
                     continue;
@@ -631,7 +655,7 @@ pub async fn run_static_ct_watcher(log: CtLog, ctx: WatcherContext) {
                         }
                         None => {
                             health.record_failure(config.unhealthy_threshold);
-                            warn!(log = %log.description, "failed to parse checkpoint");
+                            debug!(log = %log.description, "failed to parse checkpoint");
                             metrics::counter!("certstream_static_ct_checkpoint_errors").increment(1);
                             sleep(health.get_backoff()).await;
                             continue;
@@ -639,7 +663,7 @@ pub async fn run_static_ct_watcher(log: CtLog, ctx: WatcherContext) {
                     },
                     Err(e) => {
                         health.record_failure(config.unhealthy_threshold);
-                        warn!(log = %log.description, error = %e, "failed to read checkpoint");
+                        debug!(log = %log.description, error = %e, "failed to read checkpoint");
                         metrics::counter!("certstream_static_ct_checkpoint_errors").increment(1);
                         sleep(health.get_backoff()).await;
                         continue;
@@ -651,7 +675,7 @@ pub async fn run_static_ct_watcher(log: CtLog, ctx: WatcherContext) {
                     metrics::counter!("certstream_log_health_checks_failed").increment(1);
                 }
                 health.record_failure(config.unhealthy_threshold);
-                warn!(log = %log.description, error = %e, "failed to fetch checkpoint");
+                debug!(log = %log.description, error = %e, "failed to fetch checkpoint");
                 metrics::counter!("certstream_static_ct_checkpoint_errors").increment(1);
                 sleep(health.get_backoff()).await;
                 continue;
@@ -663,7 +687,7 @@ pub async fn run_static_ct_watcher(log: CtLog, ctx: WatcherContext) {
         // checkpoint replica, or a partial deployment — back off and retry
         // rather than reading stale tiles.
         if raw_tree_size < high_water_tree_size {
-            warn!(
+            debug!(
                 log = %log.description,
                 got = raw_tree_size,
                 high_water = high_water_tree_size,
@@ -732,10 +756,10 @@ pub async fn run_static_ct_watcher(log: CtLog, ctx: WatcherContext) {
                                 .map(|secs| secs.saturating_mul(1_000))
                                 .unwrap_or(LogHealth::RATE_LIMIT_BACKOFF_MS);
                             health.record_rate_limit_with_ms(config.unhealthy_threshold, retry_after_ms);
-                            warn!(log = %log.description, retry_after_ms, "rate limited by static CT log, backing off");
+                            debug!(log = %log.description, retry_after_ms, "rate limited by static CT log, backing off");
                         } else {
                             health.record_failure(config.unhealthy_threshold);
-                            warn!(log = %log.description, url = %url, status = %status, "tile fetch failed");
+                            debug!(log = %log.description, url = %url, status = %status, "tile fetch failed");
                         }
                         sleep(health.get_backoff()).await;
                         break 'tile_loop;
@@ -947,7 +971,7 @@ pub async fn run_static_ct_watcher(log: CtLog, ctx: WatcherContext) {
                         }
                         Err(e) => {
                             health.record_failure(config.unhealthy_threshold);
-                            warn!(log = %log.description, error = %e, "failed to read tile response body");
+                            debug!(log = %log.description, error = %e, "failed to read tile response body");
                             sleep(health.get_backoff()).await;
                             break 'tile_loop;
                         }
@@ -955,7 +979,7 @@ pub async fn run_static_ct_watcher(log: CtLog, ctx: WatcherContext) {
                 }
                 Err(e) => {
                     health.record_failure(config.unhealthy_threshold);
-                    warn!(log = %log.description, error = %e, "failed to fetch tile");
+                    debug!(log = %log.description, error = %e, "failed to fetch tile");
                     sleep(health.get_backoff()).await;
                     break 'tile_loop;
                 }

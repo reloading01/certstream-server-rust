@@ -1,15 +1,3 @@
-// mimalloc on Linux only. macOS / Windows / MSVC fall through to the system
-// allocator (the mimalloc dep is target-gated in Cargo.toml). Opt out on
-// Linux with `--no-default-features --features simd`.
-//
-// v1.6.0 originally planned tikv-jemallocator but it silently failed to
-// activate on Alpine/musl static builds — jemalloc compiled in but never
-// initialized at runtime (MALLOC_CONF was ignored, [heap] mapping persisted,
-// stats_print emitted nothing). mimalloc works cleanly on the same target.
-#[cfg(all(feature = "mimalloc", target_os = "linux"))]
-#[global_allocator]
-static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
-
 mod api;
 mod cli;
 mod config;
@@ -255,6 +243,48 @@ async fn main() {
         info!(rfc6962 = rfc_count, static_ct = static_count, "CT watcher pool started");
     } else {
         info!("dry-run mode: skipping CT log connections");
+    }
+
+    // Heartbeat: periodic throughput summary at INFO. Without this the log
+    // looks frozen after startup since all per-iteration transient events are
+    // debug-level — operators couldn't tell the difference between "healthy
+    // and busy" and "stuck". The tick interval is wide enough not to spam.
+    {
+        use std::sync::atomic::Ordering;
+        let stats = server_stats.clone();
+        let dedup = dedup_filter.clone();
+        let heartbeat_cancel = shutdown_token.clone();
+        tokio::spawn(async move {
+            const INTERVAL: Duration = Duration::from_secs(30);
+            let mut interval = tokio::time::interval(INTERVAL);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            interval.tick().await; // skip the immediate fire-on-start
+            let mut last_processed: u64 = 0;
+            let mut last_sent: u64 = 0;
+            loop {
+                tokio::select! {
+                    _ = heartbeat_cancel.cancelled() => break,
+                    _ = interval.tick() => {
+                        let processed = stats.certificates_processed.load(Ordering::Relaxed);
+                        let sent = stats.messages_sent.load(Ordering::Relaxed);
+                        let d_processed = processed.saturating_sub(last_processed);
+                        let d_sent = sent.saturating_sub(last_sent);
+                        let rate = d_processed as f64 / INTERVAL.as_secs() as f64;
+                        info!(
+                            certs_total = processed,
+                            certs_delta = d_processed,
+                            certs_per_sec = format!("{rate:.0}"),
+                            broadcast_total = sent,
+                            broadcast_delta = d_sent,
+                            dedup_cache = dedup.len(),
+                            "heartbeat"
+                        );
+                        last_processed = processed;
+                        last_sent = sent;
+                    }
+                }
+            }
+        });
     }
 
     let connection_limiter =

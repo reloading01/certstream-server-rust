@@ -95,9 +95,9 @@ impl DedupFilter {
         metrics::gauge!("certstream_dedup_cache_size").set(self.seen.len() as f64);
     }
 
-    /// Snapshot of current entry count. Test-only helper; prod code reads
-    /// `certstream_dedup_cache_size` gauge for the same information.
-    #[cfg(test)]
+    /// Snapshot of current entry count. Used by the heartbeat log and by
+    /// tests; the `certstream_dedup_cache_size` Prometheus gauge carries
+    /// the same value for scrape-based monitoring.
     #[allow(clippy::len_without_is_empty)]
     pub fn len(&self) -> usize {
         self.seen.len()

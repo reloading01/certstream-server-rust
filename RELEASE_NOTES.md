@@ -1,332 +1,177 @@
-# Release Notes
+# Release Notes — v1.5.0
 
-# v1.6.0 — drop-in performance release (allocator, parser optimizations, JSON backend choice)
+**Release date:** May 19, 2026
 
-**Release date: TBD**
+v1.5.0 is focused on one thing: making the server behave like production software under real load.
 
-This is a **drop-in upgrade** from v1.5.x. Existing deployments can pull the new binary and restart — no config changes, no schema changes, no action required.
+This release fixes multiple race conditions, removes several failure paths, hardens the networking layer, reduces memory usage, and significantly improves long-term runtime stability.
 
-The headline wins come from switching the global allocator on Linux (which eliminates the slow RSS drift you may have seen over multi-day runs), tightening a few existing knobs (dedup sweep cadence, reqwest idle pool, connection-limiter zombie sweep), and trimming per-cert allocation churn in the parser hot path.
+The old multi-tier rate limiting system has been removed completely. In practice it added complexity without delivering meaningful operational value.
 
----
-
-## Performance
-
-Numbers below are from a representative deployment; fill in your own with `MIMALLOC_SHOW_STATS=1` + a soak run before promoting.
-
-| Metric           | v1.4.x   | v1.5.0   | v1.6.0   |
-|------------------|----------|----------|----------|
-| Idle RSS         | 223 MiB  | 174 MiB  | _TBD_    |
-| Loaded RSS       | 253 MiB  | 198 MiB  | _TBD_    |
-| Loaded CPU       | 49%      | 25%      | _TBD_    |
-| 24-hour RSS drift | upward  | upward (mild) | flat (target) |
-| p50 broadcast latency | _TBD_ | _TBD_ | _TBD_ |
-| p99 broadcast latency | _TBD_ | _TBD_ | _TBD_ |
-
-The drift line is the single most consequential change: under glibc/musl malloc the RSS curve had a low-frequency upward stair-step driven by allocator fragmentation, not a true leak. Switching to mimalloc converts that into a flat curve that tracks workload — the same pattern the Svix / Vector / Pingora write-ups describe.
-
----
-
-## What changed
-
-### Allocator (Linux)
-
-`#[global_allocator]` is now mimalloc on Linux builds. macOS, Windows, and MSVC builds remain on the system allocator (the dep is target-gated and simply not compiled there). Activation confirmed in CI via `MIMALLOC_VERBOSE=1` init banner and `MIMALLOC_SHOW_STATS=1` exit dump.
-
-mimalloc's defaults already match what we want for an RSS-sensitive monitoring service (10 ms purge delay; background page return). The Dockerfile sets `MIMALLOC_VERBOSE=0` to suppress init noise — nothing else is tuned.
-
-**Opt out (Linux):**
-
-```bash
-cargo build --release --no-default-features --features simd
-```
-
-This keeps simd-json on and the system allocator active.
-
-### Release profile
-
-- `lto = "fat"` (explicit; equivalent to `lto = true` in modern cargo).
-- `target-cpu=x86-64-v3` is applied **only in the Docker build** (Dockerfile `RUSTFLAGS`) and only for `linux/amd64` builds. This requires Haswell+ / Zen+ host CPUs; standard AWS / GCP / Azure tiers since ~2017 are fine. Cheap VPS providers on older Intel Xeons may not be — if that's your target, build outside the Dockerfile.
-- `panic = "unwind"` is set explicitly. See "Notes on implementation choices" below for why we did **not** flip to `panic = "abort"`.
-
-### Internal tuning (no API impact)
-
-- Dedup cleanup cadence: 60 s → **15 s**. Flattens the sawtooth excursion between sweeps and lets the allocator release pages sooner.
-- `ConnectionLimiter::cleanup_stale()` added and wired into its own periodic task — runs whenever `connection_limit.enabled`, independent of `rate_limit.enabled`. Previously, no zombie sweep existed at all; deployments running with `rate_limit` off had an unbounded per-IP map.
-- Reqwest idle pool: `pool_max_idle_per_host: 4 → 2`, `pool_idle_timeout: 60 s → 30 s`. Trims idle TCP+TLS state across ~55 CT log hosts.
-
-### Parser optimizations
-
-The per-certificate hot path got three changes, each validated by byte-equivalence snapshot tests against a 51-cert corpus (11 synthetic + 40 sampled from live CT) to guarantee output stability:
-
-- **Thread-local scratch buffer** for extension display-string building. Replaces the per-call `format!` realloc churn with `write!` into a reused `String`.
-- **SmallVec for accumulators** (`san_parts`, `aia_parts`, `policy_strs`) — most certs have a handful of entries; the inline-capacity case skips the heap alloc entirely.
-- **`needs_extensions` skip**. New public `parse_certificate_with_options` / `parse_leaf_input_with_options` entry points take a `ParseOptions { include_der, parse_extensions }` struct. When the runtime config has both `full` and `lite` streams disabled (only `domains_only` subscribed), per-cert extension display-string parsing is skipped entirely. `all_domains` is still populated from the SAN extension regardless of this flag, so the `domains_only` payload is byte-identical to the v1.5.x output — verified by dedicated `parse_extensions_skip_preserves_domains_only_*` snapshot tests on both synthetic and live CT data.
-
-The existing `parse_certificate` / `parse_leaf_input` functions remain on the public API surface as backwards-compatible wrappers for external crate consumers (fuzz target, integration tests).
-
-### Optional JSON backend: sonic-rs
-
-A new `sonic` Cargo feature swaps the JSON serializer for cloudwego/sonic-rs (benchmarks ~1.5–2× faster than simd-json on typical payloads). **Default OFF.** Backend precedence is `sonic > simd > serde_json`.
-
-**Opt in:**
-
-```bash
-cargo build --release --features sonic
-```
-
-**Edge cases to understand before enabling:**
-
-- **NaN / Infinity floats:** sonic-rs accepts them and emits the non-standard tokens `"NaN"` / `"inf"`. serde_json and simd-json reject. certstream-server payloads never produce NaN floats (all f64 fields derive from monotonic millisecond timestamps), so this is theoretical for current code — but if a future field could carry NaN, sonic is the wrong backend.
-- **Unicode escaping:** serde_json escapes some non-ASCII control bytes that sonic-rs leaves raw. Both are valid JSON per RFC 8259, but downstream consumers doing byte-level diffing may notice.
-- **Number precision:** round-trip is byte-identical for normal f64 values. Integers above 2⁵³ may differ — irrelevant for our payload.
-
-Sonic-rs uses runtime CPU dispatch (SSE4.2 / AVX2 on x86, NEON on arm64), so the binary stays portable.
-
-### IssuerCache backend
-
-Internal swap from `moka` to `quick_cache`. Identical `get` / `insert` semantics for our usage (bounded fingerprint → DER map, ~10 k entries). quick_cache is lighter weight: no TinyLFU sketch, no async housekeeping task, synchronous eviction on insert. `Cargo.lock` shrank by ~220 lines.
-
-### Tokio feature trim
-
-`tokio = { features = ["full"] }` is now the explicit list `["rt-multi-thread","net","sync","time","io-util","macros","fs","signal"]`. The features `"full"` additionally pulls in (`process`, `tracing`, `parking_lot`, `test-util`) are confirmed unused by this codebase. Compile errors were the gate.
-
-### Build infrastructure
-
-- BuildKit cache mounts added to the Dockerfile. First build pays the full cost; rebuilds reuse the cargo registry and target dir between runs.
-- Multi-arch build fix: the prior `FROM --platform=$BUILDPLATFORM` line caused cargo to compile for the host triple instead of the target. Reverted to the direct qemu-emulated path.
-
----
-
-## Known invariants preserved
-
-Nothing in this release should change observable behaviour from v1.5.x. Specifically:
-
-- **WebSocket message schemas** — `full`, `lite`, `domains_only`, `dns_entries`, and any internal variant. JSON field names, ordering, types, null/empty handling — all byte-equivalent to v1.5.x, verified by the parser snapshot suite (51-cert hybrid corpus: 11 synthetic + 40 live CT).
-- **REST API responses** — `/api/cert/{hash}`, `/metrics`, `/health`, `/health/deep`. Same paths, same status codes, same response bodies.
-- **Configuration file format** — YAML schema, field names, defaults. v1.5.x configs load and behave identically.
-- **CLI flags & environment variables** — no renames, no removals, no behaviour changes on existing flags. New env vars (`MIMALLOC_*`, sonic-rs feature) default to current v1.5.x behaviour.
-- **Prometheus metric names & labels** — `certstream_messages_sent`, `certstream_certificates_processed`, `certstream_dedup_cache_size`, etc. Dashboard / alert queries do not need updating.
-- **State file format** — v1.5.x state files load cleanly in v1.6.0.
-
----
-
-## Recommended `MIMALLOC_*` env vars for users running outside the Dockerfile
-
-Our Dockerfile sets:
-
-```
-MIMALLOC_VERBOSE=0
-```
-
-That's the only knob; mimalloc's defaults already produce aggressive page return (10 ms purge delay). For users running the binary directly on Linux:
-
-- **No env vars are required.** Defaults are fine.
-- `MIMALLOC_VERBOSE=1` — prints an init banner with all options. Useful as a one-time sanity check to confirm mimalloc is actually active. Disable in production.
-- `MIMALLOC_SHOW_STATS=1` — prints allocator stats on process exit. Useful for soak diagnostics; noisy.
-- `MIMALLOC_PURGE_DELAY=<ms>` — override the default 10 ms purge cadence. Increase for slightly higher throughput at the cost of slower page return; decrease for more aggressive RSS reclamation. The default is already aggressive — only touch this if you have a measurement that justifies it.
-
-If you've migrated from a jemalloc-based deployment, **do not** carry `MALLOC_CONF` over — it's a jemalloc-only env var and mimalloc ignores it.
-
----
-
-## Notes on implementation choices
-
-Two deliberate deviations from the original v1.6.0 plan, captured here so future-us doesn't have to spelunk the commit log.
-
-### Allocator: jemalloc → mimalloc
-
-The original plan called for `tikv-jemallocator` with `disable_initial_exec_tls`. During implementation on the Alpine/musl static-build target, jemalloc **compiled in cleanly but never activated at runtime**: `MALLOC_CONF` was silently ignored, `MALLOC_CONF=stats_print:true` emitted nothing on exit, and even `MALLOC_CONF=abort_conf:true,narenas:notanumber` failed to abort the process — all three indicators of an inactive allocator. A diagnostic marker print confirmed the cfg gate evaluated true and the `#[global_allocator]` static was compiled in, ruling out a feature-flag bug. The root cause appears to be a known interaction between musl-static + Rust 1.95 + fat LTO + tikv-jemallocator 0.6.x; we did not pin down the exact link-time mechanism. Disabling LTO didn't help.
-
-mimalloc activated cleanly on the same target on the first try — confirmed via the `MIMALLOC_VERBOSE=1` init banner (`mimalloc: process init: 0x...`, full option dump) and the `MIMALLOC_SHOW_STATS=1` exit stats (arena counts, page counts, purge counts). The fragmentation-control benefits we wanted from jemalloc are equivalent in mimalloc; the user-facing impact is identical.
-
-### `panic = "abort"` deferred — `panic = "unwind"` explicitly set
-
-The original plan called for `panic = "abort"` in the release profile (smaller binary, smaller code pages, eliminate unwinding overhead). Implementation surfaced `futures::FutureExt::catch_unwind` at `src/main.rs:498`, used by the CT poll loop to recover from worker panics. `panic = "abort"` would silently break that recovery path — under abort, the entire process dies on any worker panic rather than just losing one watcher loop iteration.
-
-We elected to defer the `panic = "abort"` switch to a later release, after a deliberate audit of the unwinding contract (refactor the worker-panic recovery to not need `catch_unwind`, or accept the trade-off knowingly). `panic = "unwind"` is set explicitly in `[profile.release]` so future readers don't wonder why it's missing from the hardening list.
-
----
-
-## Upgrade procedure
-
-1. Pull the new binary / image.
-2. Restart.
-
-That's it. If you're running outside the Dockerfile and want the allocator opt-out, see above. If you want to try sonic-rs, see above.
-
----
-
-
-
-**May 19, 2026**
-
-This release focused heavily on correctness, stability, and real-world reliability.
-
-The multi-tier rate limiting system has been removed entirely. In practice it introduced unnecessary complexity without providing meaningful operational value.
-
-The Rust toolchain is now pinned to Edition 2024.
+The Rust toolchain is now pinned to **Edition 2024**.
 
 This is a strongly recommended upgrade for all deployments.
 
-The only breaking change is the WebSocket frame switch to Text frames. Most existing clients already support both formats and should continue working without modification.
+---
+
+# TL;DR
+
+### Major improvements
+
+* Fixed multiple P0 race conditions and state consistency bugs
+* Eliminated duplicate broadcast edge cases
+* Reduced idle and loaded CPU usage dramatically
+* Lowered default memory footprint by ~22%
+* Added rollback protection for RFC6962 logs
+* Improved WebSocket reliability under slow/stalled clients
+* Hardened gzip parsing and chain parsing logic
+* Removed startup panic paths
+* Shared issuer cache across watchers
+* Added proper idle-server optimization
+* Simplified rate limiting model
+
+### Breaking change
+
+WebSocket messages now use **Text frames** instead of binary frames.
+
+Most existing clients already support this automatically.
 
 ---
 
-# Data integrity (P0)
+# Performance
 
-## Dedup race condition fixed (#2)
+After tuning and long-duration soak testing:
 
-`DedupFilter::is_new` previously used a `get_mut` followed by `insert`, which allowed two concurrent calls for the same SHA-256 hash to both observe the value as missing and return `true`. Under load, this could broadcast the same certificate twice.
+| Metric     |  Before |   After |
+| ---------- | ------: | ------: |
+| Idle RSS   | 223 MiB | 174 MiB |
+| Loaded RSS | 253 MiB | 198 MiB |
+| Loaded CPU |     49% |     25% |
 
-The implementation now uses `DashMap::entry`, ensuring the check-and-insert sequence stays protected under the same shard lock.
+12-hour soak testing results:
 
-A regression test with 32 threads × 1000 calls now guarantees exactly one successful insertion.
+* 0 panics
+* 0 restarts
+* 0 healthcheck failures
+* 38.3M duplicates filtered
+* stable RSS plateau
+
+Compared against the Go implementation (`0rickyy0/certstream-server-go`) with 100 WebSocket clients:
+
+| Metric       | Rust v1.5.0 |      Go |
+| ------------ | ----------: | ------: |
+| Avg CPU      |         13% |     38% |
+| Peak RSS     |     118 MiB | 161 MiB |
+| Memory swing |      ±5 MiB | ±66 MiB |
+
+The Rust implementation consistently maintained:
+
+* lower CPU usage
+* tighter memory stability
+* lower peak RSS
+* full static-CT support
 
 ---
 
-## Dedup cache wipe removed (#3)
+# Data Integrity
 
-When the dedup cache hit its 1M-entry capacity, the previous implementation called `self.seen.clear()`. That effectively wiped all in-flight deduplication state and caused an immediate duplicate storm.
+## Dedup race condition fixed
 
-The cache now performs targeted expiration via `evict_expired()` instead of catastrophic full clears.
+`DedupFilter::is_new` previously allowed concurrent inserts for the same SHA-256 hash under load, which could broadcast duplicate certificates.
+
+The implementation now uses `DashMap::entry`, ensuring atomic check-and-insert behavior.
+
+A regression test with:
+
+* 32 threads
+* 1000 calls each
+
+now guarantees exactly one successful insertion.
 
 ---
 
-## State persistence TOCTOU fixed (#1)
+## Dedup cache wipe removed
 
-`save_if_dirty` previously cleared the dirty flag *after* writing to disk. Any updates landing between snapshot creation and flag clearing could silently disappear from future flush cycles.
+Previously, reaching the 1M-entry dedup capacity triggered a full cache clear.
 
-The dirty flag is now cleared *before* snapshot generation using `swap(false)`. Failed saves automatically re-arm the flag.
+That caused immediate duplicate storms.
+
+The cache now performs targeted expiration instead of catastrophic wipes.
 
 ---
 
-## Static-CT rollback guard now persists across restarts (#5)
+## State persistence race fixed
 
-`high_water_tree_size` was incorrectly reset to `0` every time a watcher restarted, effectively disabling rollback protection after reboot.
+`save_if_dirty` previously cleared the dirty flag after disk writes, creating a TOCTOU window where updates could be lost.
 
-The watcher now restores its high-water mark directly from persisted state via `state_manager.get_tree_size(url)`.
+The dirty flag is now cleared before snapshot generation using atomic swap semantics.
 
-Regression coverage was added in `src/state.rs`.
+Failed saves automatically re-arm persistence.
 
 ---
 
 ## RFC6962 rollback protection added
 
-Rollback protection previously existed only for static-CT watchers. RFC6962 logs had no equivalent guard, meaning a malicious or broken log returning a smaller `tree_size` than previously observed would still be followed silently.
+Rollback protection now exists for both:
 
-Both protocols now share the same high-water rollback protection logic.
+* static-CT
+* RFC6962 watchers
 
-A defensive `checked_sub` was also added around `tree_size - 1`.
+Logs returning smaller `tree_size` values than previously observed are now rejected safely.
 
----
-
-## Idle broadcast receiver bug fixed
-
-The original:
-
-```rust
-let (tx, _rx) = broadcast::channel(...)
-```
-
-kept `_rx` alive for the lifetime of the process. That meant `receiver_count()` never dropped below 1, which completely disabled the idle serialization guard introduced in fix #13.
-
-As a result, idle servers still serialized JSON three times per certificate even when nobody was connected.
-
-The placeholder receiver was removed entirely.
-
-A regression test now verifies serialization is skipped correctly when no subscribers exist.
+Additional bounds protection was added around `tree_size - 1`.
 
 ---
 
-## CertificateCache eviction race fixed
+## Certificate cache eviction race fixed
 
-TTL eviction of an older SHA-256 entry could incorrectly delete the index entry belonging to a newer copy of the same certificate.
+TTL eviction could previously invalidate the API index for newer copies of the same certificate, causing false `404` responses.
 
-That caused `/api/cert/{hash}` to return 404 even though the certificate still existed in memory.
-
-Eviction now uses `remove_if(Arc::ptr_eq)` so index removal only happens if the entry still points to the exact object being evicted.
+Eviction now validates pointer identity before removing index entries.
 
 ---
 
-## Hot reload authentication bypass fixed (P0 security)
+# Reliability & Stability
 
-Before v1.5.0, hot reload parsed partial YAML configs into `PartialConfig` and filled missing sections using `Default::default()`.
+## Startup panics removed
 
-Unfortunately, `AuthConfig::default()` sets:
+Critical startup paths no longer rely on `.expect()`.
 
-```rust
-enabled = false
-```
+Graceful shutdown handling now covers:
 
-Meaning any config reload that omitted the `auth:` section would silently disable authentication on the running server.
+* invalid TLS files
+* occupied ports
+* malformed YAML configs
 
-Hot reload now preserves the currently active configuration for all omitted sections instead of resetting them.
-
-Two regression tests were added:
-
-- `test_load_empty_yaml_keeps_current`
-- `test_partial_yaml_only_overrides_specified_sections`
+All failures are logged properly through the cancellation token system.
 
 ---
 
-# Startup & availability (P0)
+## Config validation now runs on normal startup
 
-## Server startup panics removed (#9)
-
-Critical startup paths including:
-
-- `RustlsConfig::from_pem_file`
-- listener bind
-- serve loop startup
-
-no longer use `.expect()`.
-
-Errors are now logged properly and trigger graceful shutdown through the cancellation token system.
-
-Integration tests cover:
-
-- invalid TLS files
-- occupied ports
-- malformed YAML configs
-
----
-
-## `buffer_size = 0` startup panic fixed
-
-Normal startup previously skipped `Config::validate()`. Validation only happened through `--validate-config`.
-
-This allowed invalid configs like:
+Invalid configs such as:
 
 ```yaml
 buffer_size: 0
 ```
 
-to reach `broadcast::channel(0)` and panic immediately.
+previously reached runtime and panicked immediately.
 
-Validation now runs during every normal startup path.
+Validation now runs during all startup paths.
 
 ---
 
-## WebSocket slow-client DoS fixed
+## Slow WebSocket client protection
 
-Outbound WebSocket writes previously had no timeout:
-
-```rust
-sender.send(...).await
-```
-
-A stalled client with a full TCP buffer could permanently block its connection task while still holding a file descriptor and broadcast receiver.
-
-All outbound writes now use:
+Outbound WebSocket writes now enforce:
 
 ```rust
 WRITE_TIMEOUT = 10s
 ```
 
-Timed-out clients are disconnected automatically.
+Stalled clients are disconnected automatically instead of permanently blocking connection tasks.
 
-A new metric was added:
+New metric:
 
 ```text
 certstream_ws_disconnect_write_timeout
@@ -334,115 +179,65 @@ certstream_ws_disconnect_write_timeout
 
 ---
 
-# Protocol & ergonomics (P1)
+## Per-client lag disconnects
 
-## WebSocket frames now use Text (#4)
+Clients that fall behind for 5 consecutive lag events are now disconnected automatically.
 
-Heartbeat and certificate update messages now use `Message::Text`, matching the original certstream protocol behavior.
-
-v1.5 previously used binary frames.
-
-This is technically breaking for clients hardcoded to binary-only handling, though standard clients such as:
-
-- certstream-python
-- browser WebSocket APIs
-- `websockets`
-
-already work without changes.
-
----
-
-## Zero-copy WebSocket text path
-
-The initial Text-frame migration introduced:
-
-```rust
-from_utf8(&bytes).to_string()
-```
-
-which allocated a new `String` for every subscriber and every message.
-
-The implementation now uses:
-
-```rust
-Utf8Bytes::try_from(bytes)
-```
-
-allowing zero-copy shared buffer reuse.
-
----
-
-## Per-client lag disconnect added (#10)
-
-Clients that fall behind for 5 consecutive `Lagged` events are now disconnected automatically.
-
-The threshold lives in:
+Threshold:
 
 ```rust
 lag_policy::MAX_CONSECUTIVE_LAGS
 ```
 
-with unit and tokio-broadcast regression tests validating the behavior.
+---
+
+## Idle-server CPU optimization
+
+JSON serialization is now skipped entirely when no subscribers are connected.
+
+This significantly reduces idle CPU usage on ingest-only deployments.
 
 ---
 
-## Idle-server CPU usage reduced (#13)
+# Memory & Resource Usage
 
-JSON serialization is now skipped entirely when:
+## Shared issuer cache
+
+Issuer caches are now shared globally across watchers instead of allocating separate caches per CT log.
+
+Benefits:
+
+* lower RAM usage
+* improved issuer reuse
+* faster issuer prewarm behavior
+
+---
+
+## Issuer prewarm concurrency capped
+
+Large tiles previously triggered unbounded issuer fetch fan-out.
+
+Prewarm now uses bounded concurrency:
 
 ```rust
-receiver_count() == 0
+MAX_INFLIGHT_ISSUER_FETCHES = 16
 ```
 
-Combined with the placeholder receiver fix above, this finally allows idle servers to remain truly idle.
+and skips already-cached fingerprints.
 
 ---
 
-# Memory & footprint (P1)
+## Gzip bomb protection
 
-## Shared issuer cache across static-CT watchers
-
-Before v1.5.0, every static-CT watcher allocated its own 10K-entry `IssuerCache`.
-
-With ~25 CT logs, this created large amounts of duplicated issuer DER data and wasted tens of MiB of RAM.
-
-`IssuerCache` now lives on `WatcherContext` and is shared globally across watchers.
-
-This improves:
-
-- cross-log issuer reuse
-- memory footprint
-- issuer prewarm efficiency
-
----
-
-## Issuer prewarm fan-out capped
-
-Large tiles previously triggered unbounded concurrent issuer fetches through `join_all`.
-
-That ignored operator rate limiting entirely.
-
-Issuer prewarm now uses:
-
-```rust
-for_each_concurrent(MAX_INFLIGHT_ISSUER_FETCHES = 16)
-```
-
-and skips fingerprints already present in cache.
-
----
-
-## Gzip bomb protection added
-
-`decompress_tile` previously used unrestricted `read_to_end`, allowing tiny malicious gzip streams to expand into gigabytes of memory usage.
-
-Decompression is now capped at:
+Tile decompression is now capped at:
 
 ```rust
 MAX_DECOMPRESSED_TILE_BYTES = 16 MiB
 ```
 
-Oversized payloads are rejected and tracked under:
+Oversized payloads are rejected safely.
+
+Metric added:
 
 ```text
 certstream_static_ct_decompress_oversize
@@ -450,134 +245,152 @@ certstream_static_ct_decompress_oversize
 
 ---
 
-# Reliability (P1)
+# Protocol Changes
 
-## Health checks no longer accept 5xx responses
+## WebSocket frames now use Text
 
-Recovery probes previously treated any HTTP response as success as long as the request itself didn’t error.
-
-That meant even `503 Service Unavailable` responses marked logs as healthy.
-
-Recovery now requires:
+Certificate updates and heartbeat messages now use:
 
 ```rust
-status().is_success()
+Message::Text
 ```
 
----
+instead of binary frames.
 
-## RateLimiter cleanup lock contention reduced
+Most clients already support this automatically, including:
 
-`cleanup_stale()` previously held the shard write lock while also locking every entry mutex.
-
-That blocked unrelated traffic on the same shard.
-
-Cleanup now performs:
-
-1. short read snapshot pass
-2. targeted `remove_if` cleanup
-
-avoiding nested locking entirely.
+* browser WebSocket APIs
+* certstream-python
+* standard websocket libraries
 
 ---
 
-# Security & hardening
+## Zero-copy WebSocket text path
 
-## Constant-time auth preserved (#8)
+The initial Text-frame migration introduced unnecessary per-message string allocations.
 
-Authentication token comparisons still use:
+The implementation now uses:
+
+```rust
+Utf8Bytes::try_from(bytes)
+```
+
+allowing shared-buffer reuse without additional allocations.
+
+---
+
+# Security & Hardening
+
+## Hot reload authentication bypass fixed
+
+Before v1.5.0, partial hot reload configs could unintentionally disable authentication because omitted sections were replaced with defaults.
+
+Authentication state is now preserved correctly during reloads.
+
+Regression tests added for:
+
+* empty YAML reloads
+* partial config overrides
+
+---
+
+## CORS scoping tightened
+
+Permissive CORS headers now apply only to public endpoints:
+
+* WebSocket
+* SSE
+* `/api/cert/{hash}`
+
+Operator-only routes such as:
+
+* `/metrics`
+* `/health`
+* `/example.json`
+
+no longer expose permissive CORS behavior.
+
+---
+
+## RFC6962 parser bounds enforced
+
+Certificate chain parsing now strictly respects declared chain lengths.
+
+Trailing bytes beyond the declared length are rejected.
+
+---
+
+## Constant-time auth preserved
+
+Authentication token comparison still uses:
 
 ```rust
 subtle::ct_eq
 ```
 
-The removed tier-token system also used the same helper, but its removal does not affect authentication behavior.
+to avoid timing attacks.
 
 ---
 
-## CORS scoping tightened (#15)
+# Runtime Tuning
 
-Permissive CORS headers now apply only to public data endpoints:
+Default settings were tightened after profiling and soak testing.
 
-- WebSocket
-- SSE
-- `/api/cert/{hash}`
+### Updated defaults
 
-Operator-only routes including:
+| Setting              | Old |  New |
+| -------------------- | --: | ---: |
+| reqwest idle pool    |  20 |    4 |
+| dedup capacity       |  1M | 200K |
+| API cache            | 10K |   1K |
+| tokio worker threads |   8 |    4 |
 
-- `/health`
-- `/metrics`
-- `/example.json`
+These changes reduce:
 
-no longer expose permissive CORS.
+* idle CPU usage
+* long-term memory drift
+* RSS footprint
 
-This prevents malicious websites from scraping Prometheus data through victim browsers.
-
----
-
-## RFC6962 chain parser bounds enforced
-
-`parse_chain_from_bytes` previously skipped the 3-byte chain length prefix without enforcing it.
-
-Extra trailing bytes beyond the declared chain length could still be parsed as valid certificates.
-
-The parser now slices strictly to the declared `chain_byte_len`.
+while maintaining compatibility.
 
 ---
 
-# Memory tuning (~22% default footprint reduction)
+# Major CPU Fix
 
-Several default settings were tightened after profiling and long-duration soak testing.
+## Dedup hot-path thrash removed
 
-None of these changes break compatibility — all values remain configurable through YAML or environment variables.
+`DedupFilter::is_new` previously triggered inline expiration scans whenever capacity was reached.
 
-Key reductions:
+Under real-world ingest this caused repeated O(n) scans inside the hot path.
 
-- reqwest idle pool: `20 → 4`
-- dedup capacity: `1M → 200K`
-- API cache: `10K → 1K`
-- tokio worker threads: `8 → 4`
+Observed behavior before the fix:
 
-Result:
+| Scenario          | CPU Usage |
+| ----------------- | --------: |
+| Idle containers   |      211% |
+| Loaded containers |      268% |
 
-- ~22% lower RSS
-- significantly lower idle CPU usage
-- more stable long-term memory plateau
+Expiration now happens only inside the periodic cleanup task.
 
----
+Post-fix:
 
-# Critical performance fix discovered during tuning
-
-## Dedup hot-path CPU thrash fixed
-
-`DedupFilter::is_new` previously triggered `evict_expired()` inline whenever capacity was reached.
-
-Under real-world ingest, every insert began performing an O(n) DashMap scan.
-
-Observed CPU usage:
-
-- idle containers: `211%`
-- loaded containers: `268%`
-
-Capacity is now advisory only. Expiration happens exclusively in the periodic cleanup task.
-
-Post-fix results:
-
-- idle CPU: `5%`
-- loaded CPU: `16%`
+| Scenario          | CPU Usage |
+| ----------------- | --------: |
+| Idle containers   |        5% |
+| Loaded containers |       16% |
 
 ---
 
-# Dependency upgrades
+# Dependency Updates
 
-Core dependency stack updated to current stable versions, including:
+Core stack updated to current stable releases:
 
-- tokio 1.52
-- reqwest 0.13
-- axum-server 0.8
-- simd-json 0.17
-- x509-parser 0.18
-- notify 8
+* tokio 1.52
+* reqwest 0.13
+* axum-server 0.8
+* simd-json 0.17
+* x509-parser 0.18
+* notify 8
 
 Builder image updated to:
 
@@ -587,97 +400,41 @@ rust:1.95-alpine
 
 ---
 
-# Validation
-
-12-hour dual-system soak test:
-
-- idle ingest-only container
-- loaded container with 100 WebSocket clients
-
-Results:
-
-- 0 panics
-- 0 restarts
-- 0 healthcheck failures
-- 38.3M duplicates filtered
-- stable RSS plateau
-- major CPU reduction after tuning
-
-Post-tuning improvements:
-
-| Metric | Before | After |
-|---|---:|---:|
-| Idle RSS | 223 MiB | 174 MiB |
-| Loaded RSS | 253 MiB | 198 MiB |
-| Loaded CPU | 49% | 25% |
-
----
-
 # Removed
 
-## Multi-tier rate limiting removed
+The following features no longer exist:
 
-The following concepts no longer exist:
-
-- `RateLimitTier::{Free, Standard, Premium}`
-- tier token tables
-- standard/premium rate knobs
+* `RateLimitTier::{Free, Standard, Premium}`
+* tier token tables
+* standard/premium throughput configs
 
 Rate limiting is now unified and based solely on source IP.
 
-Authentication now controls *access*, while rate limiting controls *throughput*.
+Authentication controls access.
 
-Legacy YAML keys still parse through serde aliases for backward compatibility.
+Rate limiting controls throughput.
 
----
-
-# Refactors & maintenance
-
-Highlights:
-
-- operator limiter rewrite
-- worker loop deduplication
-- environment override macro cleanup
-- public `lib.rs` façade for fuzzing and external integration tests
+Legacy YAML keys still deserialize through compatibility aliases.
 
 ---
 
 # Testing
 
-Total:
+Total test count:
 
 ```text
 425 passing tests
 ```
 
-Including:
+Coverage includes:
 
-- unit tests
-- integration tests
-- graceful failure tests
-- fuzz targets
-- long-duration soak validation
+* unit tests
+* integration tests
+* fuzz targets
+* graceful failure tests
+* soak validation
 
-No panics found in fuzz runs.
-
----
-
-# Performance vs Go implementation
-
-Compared against `0rickyy0/certstream-server-go` with 100 WebSocket clients:
-
-| Metric | Rust 1.5.0 | Go |
-|---|---:|---:|
-| Avg CPU | 13% | 38% |
-| Peak RSS | 118 MiB | 161 MiB |
-| Memory swing | ±5 MiB | ±66 MiB |
-
-The Rust implementation consistently achieved:
-
-- substantially lower CPU usage
-- tighter memory stability
-- lower peak RSS
-- full static-CT support
+No panics were found during fuzzing.
 
 ---
 
@@ -687,11 +444,13 @@ The Rust implementation consistently achieved:
 docker pull ghcr.io/reloading01/certstream-server-rust:1.5.0
 ```
 
-## Compatibility notes for v1.4.x users
+## Compatibility Notes
 
-- old standard/premium rate-limit fields are ignored
-- move old tier tokens into unified `auth.tokens`
-- WebSocket clients must accept Text frames instead of binary-only handling
+### For v1.4.x users
+
+* old standard/premium rate-limit fields are ignored
+* move legacy tier tokens into unified `auth.tokens`
+* WebSocket clients must support Text frames instead of binary-only handling
 
 ## v1.4.0 — static-ct-api v1.0.0-rc.1 + log-list discovery
 

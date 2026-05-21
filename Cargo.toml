@@ -1,24 +1,14 @@
 [package]
 name = "certstream-server-rust"
-version = "1.6.0"
+version = "1.5.0"
 edition = "2024"
 repository = "https://github.com/reloading01/certstream-server-rust"
 license = "MIT"
 description = "High-performance Certificate Transparency log streaming server"
 
 [features]
-default = ["simd", "mimalloc"]
+default = ["simd"]
 simd = ["simd-json"]
-# `mimalloc` is wired up only on Linux (see [target.'cfg(target_os = "linux")']
-# below). On macOS / Windows / MSVC the feature is a no-op marker — the
-# mimalloc dep simply isn't compiled, so the system allocator is used.
-# Opt out on Linux with `--no-default-features --features simd`.
-#
-# History: v1.6.0 initially planned tikv-jemallocator but it silently failed
-# to override the global allocator on Alpine/musl (compiled in, but runtime
-# allocations still went through musl malloc). mimalloc activates cleanly on
-# the same target and gives equivalent fragmentation-control benefits.
-mimalloc = ["dep:mimalloc"]
 # `sonic` swaps the JSON serializer for cloudwego/sonic-rs. Benchmarks have
 # it ~1.5-2× faster than simd-json on typical payloads. Default OFF because
 # the behaviour around a handful of edge cases differs subtly from
@@ -87,11 +77,6 @@ quick_cache = "0.6"
 
 [dev-dependencies]
 rcgen = "0.14"
-
-# Linux-only allocator override. mimalloc default-features disabled drops the
-# `secure` mode (slower) — we want raw speed + fragmentation control.
-[target.'cfg(target_os = "linux")'.dependencies]
-mimalloc = { version = "0.1", default-features = false, optional = true }
 
 [profile.release]
 lto = "fat"
