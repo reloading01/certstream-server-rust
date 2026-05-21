@@ -14,3 +14,7 @@ fuzz/target/
 fuzz/corpus/
 fuzz/artifacts/
 heap-profile/
+.vscode/
+benchmarks/results/
+benchmarks/__pycache__/
+__pycache__/
