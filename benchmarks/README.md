@@ -88,6 +88,20 @@ $TARGET/certstream-v1.6.0 &     # listens on default port 8080
 
 ### Comparison (`comparison_*.json`)
 
+`summarize.sh` renders three blocks for every comparison result:
+
+1. **Aggregates** — avg/peak RSS, avg CPU, deltas.
+2. **Drift curve** — per-sample table `t   v1.5.rss/cpu   v1.6.rss/cpu`.
+   For a 12h run at 2-min cadence that's 360 rows; pipe to `less` or
+   redirect to a file if you want to plot it.
+3. **Slopes + joint verdict** — linear regression of RSS over the whole
+   window per binary, in MiB/hour, with the same FLAT / borderline /
+   RISING / FALLING classification used by the soak summary, plus a
+   one-line joint verdict that maps the (v1.5, v1.6) slope pair onto
+   the v1.6.0 release thesis (allocator-driven drift elimination).
+
+Reading the aggregates:
+
 - **avg RSS**: v1.6.0 should be lower than v1.5.x. Magnitude depends on
   workload — for idle, expect tens of MiB lower; for loaded, similar or
   slightly lower at peak but **much** lower on the long tail (drift).
@@ -95,6 +109,19 @@ $TARGET/certstream-v1.6.0 &     # listens on default port 8080
   catching short-lived bursts that average-only would miss.
 - **avg CPU**: v1.6.0 should be at or below v1.5.x. Allocator + parser
   optimisations shouldn't make CPU worse; if they have, that's a regression.
+
+Reading the slopes + verdict:
+
+- **v1.5.x RISING + v1.6.0 FLAT** → mimalloc thesis validated; the
+  drift-elimination story in the release notes lands cleanly.
+- **both FLAT** → load isn't long enough or aggressive enough to
+  exercise glibc/musl fragmentation. Either run longer, or accept the
+  finding ("no observable drift in either version at this load") and
+  reword the release notes accordingly.
+- **both RISING** → something else is leaking, independent of the
+  allocator choice. Investigate before tagging.
+- **mixed** → inspect the curve directly; aggregates can hide localised
+  bumps.
 
 ### Soak (`soak_*.csv`)
 

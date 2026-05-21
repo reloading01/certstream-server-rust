@@ -44,11 +44,12 @@ fmt() { awk -v v="$1" -v fmt="${2:-%.1f}" 'BEGIN { if (v == "null" || v == "") p
 
 summarize_comparison() {
     local path=$1
-    local mode duration started subs
+    local mode duration started subs interval
     mode=$(jq -r '.mode' "$path")
     duration=$(jq -r '.duration_seconds' "$path")
     started=$(jq -r '.started_at' "$path")
     subs=$(jq -r '.subscribers_per_binary' "$path")
+    interval=$(jq -r '.sample_interval_seconds // 60' "$path")
 
     local v15_rss v16_rss v15_cpu v16_cpu v15_peak v16_peak
     v15_rss=$(jq -r '.v1_5.summary.avg_rss_mib' "$path")
@@ -67,7 +68,7 @@ summarize_comparison() {
 ${C_BOLD}=== comparison ($mode) ===${C_RST}
 file:     $path
 started:  $started
-duration: ${duration}s    subscribers/binary: $subs
+duration: ${duration}s   interval: ${interval}s   subscribers/binary: $subs
 
                    v1.5.x          v1.6.0
   avg RSS         $(fmt "$v15_rss") MiB     $(fmt "$v16_rss") MiB
@@ -78,6 +79,126 @@ duration: ${duration}s    subscribers/binary: $subs
   delta CPU       $(fmt "$cpu_change" "%+.1f") pp
 
 EOF
+
+    # ── Per-time-point drift curve + slope ─────────────────────────────────
+    #
+    # The whole point of a long side-by-side: see WHETHER v1.5.x drifts up
+    # while v1.6.0 stays flat (validates the mimalloc story), or whether
+    # both stay flat (mimalloc wasn't the differentiator).
+    #
+    # Aggregates collapse that signal. The table + slope estimates surface it.
+    local merged
+    merged=$(jq -c '
+        # Zip the two sample arrays by index (they share the same t indices
+        # because the harness samples them in lockstep each interval).
+        .v1_5.samples as $a |
+        .v1_6.samples as $b |
+        [range(0; ([($a|length), ($b|length)]|min))]
+          | map(. as $i | {
+              t:       ($a[$i].t      // 0),
+              v15_rss: ($a[$i].rss_kib // 0),
+              v15_cpu: ($a[$i].cpu_pct // 0),
+              v16_rss: ($b[$i].rss_kib // 0),
+              v16_cpu: ($b[$i].cpu_pct // 0)
+            })
+    ' "$path" 2>/dev/null)
+
+    if [ -z "$merged" ] || [ "$merged" = "[]" ] || [ "$merged" = "null" ]; then
+        printf '  (no per-sample data in this result file)\n\n'
+        return 0
+    fi
+
+    printf '%sdrift curve%s (rss in MiB, cpu in %%)\n\n' "$C_BOLD" "$C_RST"
+    printf '  %-9s  %-13s  %-13s\n' "t" "v1.5.x" "v1.6.0"
+    printf '  %-9s  %-13s  %-13s\n' "-------" "-------------" "-------------"
+    echo "$merged" | jq -r '
+        .[] | [
+            (.t | tostring + "s"),
+            ((.v15_rss / 1024) | tostring | .[0:6]) + " MiB " + ((.v15_cpu | tostring | .[0:5]) + "%"),
+            ((.v16_rss / 1024) | tostring | .[0:6]) + " MiB " + ((.v16_cpu | tostring | .[0:5]) + "%")
+        ] | @tsv
+    ' | awk -F'\t' '{ printf "  %-9s  %-13s  %-13s\n", $1, $2, $3 }'
+
+    # ── Slope (linear regression of rss_kib vs t_seconds) ──────────────────
+    echo
+    printf '%sslopes%s (linear regression of RSS over the full window)\n\n' \
+        "$C_BOLD" "$C_RST"
+
+    echo "$merged" | jq -r '
+        # Extract two parallel series: t (seconds) and rss (kib), for each binary.
+        [.[] | {t, v15_rss, v16_rss}]
+          | { t:[.[].t], v15:[.[].v15_rss], v16:[.[].v16_rss] }
+          | "\(.t|join(","))|\(.v15|join(","))|\(.v16|join(","))"
+    ' | awk -F'|' '
+        function slope_per_hour(t_csv, rss_csv,    n, i, ts, rs, sum_t, sum_r, mean_t, mean_r, num, den, s_kib_s) {
+            n = split(t_csv, ts, ",")
+            split(rss_csv, rs, ",")
+            if (n < 2) return "n/a"
+            sum_t = 0; sum_r = 0
+            for (i = 1; i <= n; i++) { sum_t += ts[i]; sum_r += rs[i] }
+            mean_t = sum_t / n; mean_r = sum_r / n
+            num = 0; den = 0
+            for (i = 1; i <= n; i++) {
+                num += (ts[i] - mean_t) * (rs[i] - mean_r)
+                den += (ts[i] - mean_t) ^ 2
+            }
+            if (den == 0) return "n/a"
+            s_kib_s = num / den               # KiB per second
+            return sprintf("%+.2f MiB/h", s_kib_s / 1024 * 3600)
+        }
+        function verdict(s,    v) {
+            # Strip the unit so we can numeric-compare.
+            v = s + 0
+            if (s == "n/a") return ""
+            if (v >  0.5)  return "RISING (investigate)"
+            if (v >  0.1)  return "drifting up (borderline)"
+            if (v < -0.5)  return "FALLING (allocator returning memory)"
+            return "FLAT (pass)"
+        }
+        {
+            v15 = slope_per_hour($1, $2)
+            v16 = slope_per_hour($1, $3)
+            printf "  v1.5.x:  %-14s   %s\n", v15, verdict(v15)
+            printf "  v1.6.0:  %-14s   %s\n", v16, verdict(v16)
+        }
+    '
+    echo
+    # ── Joint verdict for the comparison thesis ────────────────────────────
+    # Read both slopes back from the JSON one more time so the joint line
+    # is computed in a single awk pass with consistent rounding.
+    echo "$merged" | jq -r '
+        [.[] | {t, v15_rss, v16_rss}]
+          | { t:[.[].t], v15:[.[].v15_rss], v16:[.[].v16_rss] }
+          | "\(.t|join(","))|\(.v15|join(","))|\(.v16|join(","))"
+    ' | awk -F'|' '
+        function slope_mh(t_csv, rss_csv,    n, i, ts, rs, sum_t, sum_r, mean_t, mean_r, num, den, s_kib_s) {
+            n = split(t_csv, ts, ",")
+            split(rss_csv, rs, ",")
+            if (n < 2) return 0
+            sum_t = 0; sum_r = 0
+            for (i = 1; i <= n; i++) { sum_t += ts[i]; sum_r += rs[i] }
+            mean_t = sum_t / n; mean_r = sum_r / n
+            num = 0; den = 0
+            for (i = 1; i <= n; i++) {
+                num += (ts[i] - mean_t) * (rs[i] - mean_r)
+                den += (ts[i] - mean_t) ^ 2
+            }
+            return (den == 0) ? 0 : num / den / 1024 * 3600
+        }
+        {
+            v15 = slope_mh($1, $2); v16 = slope_mh($1, $3)
+            printf "  joint:   "
+            if (v15 > 0.5 && v16 < 0.1)
+                printf "v1.5.x drifts up, v1.6.0 stays flat — mimalloc thesis VALIDATED\n"
+            else if (v15 < 0.1 && v16 < 0.1)
+                printf "both flat — mimalloc not the differentiator at this load/duration\n"
+            else if (v15 > 0.5 && v16 > 0.5)
+                printf "both drifting up — investigate independently of allocator choice\n"
+            else
+                printf "mixed signal — inspect the curve directly before drawing conclusions\n"
+        }
+    '
+    echo
 }
 
 summarize_soak() {
