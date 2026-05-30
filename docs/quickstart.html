@@ -23,7 +23,7 @@
     <link rel="icon" type="image/svg+xml" href="favicon.svg">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:ital,wght@0,400;0,500;1,400&family=IBM+Plex+Sans:wght@400;500;600&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;1,6..72,400;1,6..72,500&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="styles.css">
     <script type="application/ld+json">
     {
@@ -49,7 +49,7 @@
 <body>
     <header>
         <div class="wrap">
-            <a href="/" class="logo"><img src="logo.png" alt="Certstream" style="height:28px;width:auto;display:block;">certstream-server-rust</a>
+            <a href="/" class="logo">certstream-server-rust</a>
             <nav>
                 <ul class="nav-links">
                     <li><a href="/">Home</a></li>
@@ -67,7 +67,7 @@
     </header>
     <div class="mobile-nav" id="mobile-nav">
         <div class="mobile-nav-header">
-            <a href="/" class="logo"><img src="logo.png" alt="Certstream" style="height:28px;width:auto;display:block;">certstream-server-rust</a>
+            <a href="/" class="logo">certstream-server-rust</a>
             <button class="mobile-nav-close" onclick="document.getElementById('mobile-nav').classList.remove('active')">&times;</button>
         </div>
         <ul class="mobile-nav-links">
@@ -82,24 +82,17 @@
     <main>
         <div class="wrap">
             <div class="page-header">
-                <h1>Certstream Quick Start Guide</h1>
-                <p>Run your own certificate transparency streaming server in seconds</p>
+                <span class="eyebrow">Quick start</span>
+                <h1>Your own CT stream, in three steps.</h1>
+                <p>Run a certificate transparency streaming server and start receiving certificates in seconds.</p>
             </div>
         </div>
 
         <section>
             <div class="wrap">
                 <div class="section-header">
-                    <h2>Self-Host</h2>
-                    <p>Run your own instance for production workloads</p>
-                </div>
-            </div>
-        </section>
-
-        <section>
-            <div class="wrap">
-                <div class="section-header">
-                    <h2>1. Run the Server</h2>
+                    <span class="eyebrow">Step 01</span>
+                    <h2>Run the server</h2>
                 </div>
                 <div class="code-examples" style="grid-template-columns: 1fr;">
                     <div class="code-example">
@@ -109,8 +102,8 @@
                         <pre>docker run -d -p 8080:8080 ghcr.io/reloading01/certstream-server-rust:latest</pre>
                     </div>
                 </div>
-                <p style="margin-top: 16px; color: #666; font-size: 0.9rem; text-align: center;">
-                    Server is now running at <code style="background: #1a1a1a; padding: 2px 6px; border-radius: 4px; color: #4ade80;">ws://localhost:8080</code>
+                <p style="margin-top: 16px; color: var(--ink-3); font-size: 0.9rem;">
+                    The server is now streaming at <code>ws://localhost:8080</code>.
                 </p>
             </div>
         </section>
@@ -118,7 +111,8 @@
         <section>
             <div class="wrap">
                 <div class="section-header">
-                    <h2>2. Connect</h2>
+                    <span class="eyebrow">Step 02</span>
+                    <h2>Connect</h2>
                 </div>
                 <div class="code-examples">
                     <div class="code-example">
@@ -150,6 +144,7 @@ ws.onmessage = (event) => {
                     <div class="code-example">
                         <div class="code-example-header">
                             <span class="lang">cURL</span>
+                            <span class="tag">SSE</span>
                         </div>
                         <pre>curl -N http://localhost:8080/sse</pre>
                     </div>
@@ -162,7 +157,7 @@ ws.onmessage = (event) => {
                     <div class="code-example">
                         <div class="code-example-header">
                             <span class="lang">JavaScript</span>
-                            <span class="tag">Domains-only stream</span>
+                            <span class="tag">domains-only</span>
                         </div>
                         <pre>const ws = new WebSocket("ws://localhost:8080/domains-only");
 
@@ -176,9 +171,9 @@ ws.onmessage = (event) => {
 };</pre>
                     </div>
                 </div>
-                <p style="margin-top: 16px; color: #666; font-size: 0.9rem; text-align: center;">
-                    The <code>/domains-only</code> stream uses <code>message_type: "dns_entries"</code> and <code>data</code> is a bare string array.
-                    For SSE, use <code>curl -N http://localhost:8080/sse?stream=domains</code>.
+                <p style="margin-top: 16px; color: var(--ink-3); font-size: 0.9rem;">
+                    The <code>/domains-only</code> stream uses <code>message_type: "dns_entries"</code> and its <code>data</code>
+                    is a bare string array. For SSE, use <code>curl -N http://localhost:8080/sse?stream=domains</code>.
                 </p>
             </div>
         </section>
@@ -186,13 +181,14 @@ ws.onmessage = (event) => {
         <section>
             <div class="wrap">
                 <div class="section-header">
-                    <h2>3. Production Setup</h2>
+                    <span class="eyebrow">Step 03</span>
+                    <h2>Production setup</h2>
                 </div>
                 <div class="code-examples" style="grid-template-columns: 1fr;">
                     <div class="code-example">
                         <div class="code-example-header">
                             <span class="lang">Docker</span>
-                            <span class="tag">With state persistence</span>
+                            <span class="tag">with state persistence</span>
                         </div>
                         <pre>docker run -d \
   --name certstream \
@@ -203,23 +199,24 @@ ws.onmessage = (event) => {
   ghcr.io/reloading01/certstream-server-rust:latest</pre>
                     </div>
                 </div>
+                <p style="margin-top: 16px; color: var(--ink-3); font-size: 0.9rem;">
+                    See the <a href="docs.html">API documentation</a> for the full configuration reference.
+                </p>
             </div>
         </section>
-
     </main>
 
     <footer>
         <div class="wrap">
             <div class="links">
                 <a href="https://github.com/reloading01/certstream-server-rust" target="_blank" rel="noopener">GitHub</a>
-                <a href="https://github.com/reloading01/certstream-server-rust/pkgs/container/certstream-server-rust" target="_blank" rel="noopener">GitHub Container Registry</a>
+                <a href="https://github.com/reloading01/certstream-server-rust/pkgs/container/certstream-server-rust" target="_blank" rel="noopener">Container Registry</a>
                 <a href="docs.html">Documentation</a>
                 <a href="https://github.com/reloading01/certstream-server-rust/issues" target="_blank" rel="noopener">Issues</a>
                 <a href="https://github.com/sponsors/reloading01" target="_blank" rel="noopener">Sponsor</a>
                 <a href="https://github.com/reloading01/certstream-server-rust/blob/main/LICENSE" target="_blank" rel="noopener">MIT License</a>
-
             </div>
-            <p>certstream-server-rust</p>
+            <span class="colophon">certstream-server-rust</span>
         </div>
     </footer>
 </body>

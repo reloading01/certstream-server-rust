@@ -11,14 +11,14 @@ A high-performance **certstream server** written in Rust. Monitors Certificate T
 
 Certstream aggregates certificates from Certificate Transparency (CT) logs and streams them in real-time. It provides a firehose of newly issued SSL/TLS certificates that you can filter and process for your own purposes.
 
-This Rust implementation delivers better performance than certstream-server-go while maintaining full compatibility with existing certstream clients.
+This Rust implementation is a drop-in replacement that maintains full compatibility with existing certstream clients.
 
 ### Why Rust?
 
 - ~118 MiB stable RSS under load (default config + 100 WS clients, 10-min plateau); plateau within ~5 minutes of startup, no growth over time
-- Single shared issuer cache across all static-CT watchers (1.5.0) — no per-log cache duplication
-- Pre-serialized broadcast via `Arc<PreSerializedMessage>` with zero-copy `Utf8Bytes` Text frames (1.5.0) — no per-subscriber JSON re-encoding
-- Idle-server pre-serialize guard (1.5.0) — JSON serialization skipped entirely when `receiver_count() == 0`
+- Single shared issuer cache across all static-CT watchers — no per-log cache duplication
+- Pre-serialized broadcast via `Arc<PreSerializedMessage>` with zero-copy `Utf8Bytes` Text frames — no per-subscriber JSON re-encoding
+- Idle-server pre-serialize guard — JSON serialization skipped entirely when `receiver_count() == 0`
 - ~1,000 msg/s sustained CT ingest rate; tens of MB/s WS broadcast headroom
 - SIMD-accelerated JSON via `simd-json` (enabled by default)
 - Single binary, no runtime dependencies
@@ -27,10 +27,10 @@ This Rust implementation delivers better performance than certstream-server-go w
 
 - WebSocket and Server-Sent Events (SSE)
 - Pre-serialized messages for efficient broadcasting
-- 80+ Certificate Transparency logs monitored across both Google and Apple log lists (Google, Cloudflare, DigiCert, Sectigo, Let's Encrypt, Geomys, IPng Networks, TrustAsia, …)
-- **Static-CT-API v1.0.0-rc.1 support** — checkpoint + tile protocol used by Let's Encrypt's Sycamore/Willow, Cloudflare Raio, IPng Halloumi/Gouda, Geomys Tuscolo, TrustAsia Luoshu and other 2026 logs
+- Every Chrome- and Apple-trusted Certificate Transparency log monitored across both Google and Apple log lists (Google, Cloudflare, DigiCert, Sectigo, Let's Encrypt, Geomys, IPng Networks, TrustAsia, …)
+- **Static-CT-API support** — checkpoint + tile protocol used by Let's Encrypt's Sycamore/Willow, Cloudflare Raio, IPng Halloumi/Gouda, Geomys Tuscolo, TrustAsia Luoshu and other tiled logs
 - **Tiled-log discovery** — `operators[].tiled_logs[]` auto-merged from Apple + Google lists, deduped by `log_id`
-- Cross-log dedup with tunable capacity/TTL (defaults 1M entries / 15-minute window)
+- Cross-log dedup with tunable capacity/TTL (defaults 200K entries / 15-minute window)
 - Runtime kill switches per protocol family: `CERTSTREAM_RFC6962_ENABLED`, `CERTSTREAM_STATIC_CT_ENABLED`
 - State persistence - resume from last position after restart
 - Connection limiting - protect against abuse with per-IP and total limits
@@ -130,8 +130,6 @@ rate_limit:
   burst_window_seconds: 10
 ```
 
-Legacy `free_max_tokens` / `free_refill_rate` / `free_burst` keys still parse via aliases for v1.4.x config compatibility — multi-tier (`standard_*` / `premium_*`) keys were removed in 1.5.0.
-
 **CT Log Settings**
 
 | Variable | Default | Description |
@@ -208,34 +206,26 @@ curl http://localhost:8080/health/deep
 # {"status":"healthy","logs_healthy":27,"logs_degraded":0,"logs_unhealthy":0,"logs_total":27,"active_connections":0,"uptime_secs":3600}
 ```
 
-## Performance Comparison
+## Performance
 
-Benchmarked with 100 concurrent WebSocket clients pulling the lite stream against the same Docker host, default config on both sides:
+Measured with 100 concurrent WebSocket clients pulling the lite stream, default config, 10-minute plateau window:
 
-| Metric | Rust (1.5.0) | Go (0rickyy0) | Notes |
-|--------|-------------:|--------------:|-------|
-| Memory (steady, no clients) | **113-118 MiB** | n/a | 10-min plateau, default config, 55 CT watchers |
-| Memory (avg, 100 clients) | **117 MiB** | ~100 MiB | both broadcasting at full CT rate |
-| Memory (peak, 100 clients) | **118 MiB** | **161 MiB** | Go GC pressure causes burstier RSS |
-| CPU (avg, 100 clients) | **13 %** | 38 % | one core, single host |
-| Memory salınımı | ±5 MiB | ±66 MiB | Rust plateau çok daha sıkı |
-| Cold start to first cert | <2 s | <2 s | both pull Apple + Google log list at boot |
+| Metric | Value |
+|--------|------:|
+| Memory — steady, no clients | 113–118 MiB |
+| Memory — peak, 100 clients | 118 MiB |
+| Plateau swing | ±5 MiB |
+| CPU — avg, 100 clients | ~13 % |
+| Sustained CT ingest | ~1,000 cert/s |
+| Cold start to first cert | <2 s |
 
-What we genuinely beat Go on right now:
-- **~3× lower CPU** at the same load (no GC, no per-message JSON re-encoding)
-- **Tight memory plateau** (±5 MiB vs Go's ±66 MiB swing)
-- **Lower peak RSS** under load (118 vs 161 MiB)
-- **Static-CT-API v1.0.0-rc.1 conformance** (checkpoint, tile, leaf_index extension, tree-size monotonicity) — 0rickyy0/certstream-server-go is RFC6962-only at the time of writing
-- **Tunable issuer + dedup caches** shared across all watchers (1.5.0)
+Memory settles within roughly five minutes of startup and stays flat — no GC pauses, no growth over time. Every certificate is serialized once and broadcast to all subscribers via an `Arc<PreSerializedMessage>` with zero-copy text frames; when no clients are connected, serialization is skipped entirely. The default 200K-entry cross-log dedup window costs only a few MiB and is tunable via `CERTSTREAM_DEDUP_CAPACITY`.
 
-What's still close:
-- **Average memory** is within ~15 % of Go's average. The price of holding a 1M-entry cross-log dedup window (~30-40 MiB) for the multi-log dedup quality guarantee — tunable down via `CERTSTREAM_DEDUP_CAPACITY` if you don't need it.
-
-Elixir comparison was dropped — the upstream calidog/certstream-server image isn't published, so any number we quoted would be from an unbuildable reference. Numbers above are reproducible with the scripts in `soak/` (run `bash soak/monitor-3way.sh` against your own two containers).
+Reproduce these numbers locally with the scripts in `soak/`.
 
 ## Certificate Transparency Logs
 
-Certstream monitors 50+ CT logs from all Chrome-trusted providers:
+Certstream monitors every Chrome- and Apple-trusted CT log. A sample of operators:
 
 | Provider | Logs |
 |----------|------|
