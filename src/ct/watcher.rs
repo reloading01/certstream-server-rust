@@ -140,6 +140,11 @@ impl LogHealth {
     /// value converted to milliseconds; falls back to `RATE_LIMIT_BACKOFF_MS` at the call
     /// site when the header is absent or unparseable.
     pub fn record_rate_limit_with_ms(&self, unhealthy_threshold: u32, backoff_ms: u64) {
+        if backoff_ms == Self::RATE_LIMIT_BACKOFF_MS {
+            self.record_rate_limit(unhealthy_threshold);
+            return;
+        }
+
         let mut s = self.inner.lock();
         s.consecutive_successes = 0;
         s.total_errors = s.total_errors.saturating_add(1);
@@ -257,10 +262,20 @@ pub async fn run_watcher_with_cache(log: CtLog, ctx: WatcherContext) {
 
     let base_url = log.normalized_url();
     let log_name = log.description.clone();
+    let log_id = log.log_id.clone().unwrap_or_else(|| base_url.clone());
     let source = Arc::new(Source {
         name: Arc::from(log.description.as_str()),
         url: Arc::from(base_url.as_str()),
     });
+
+    metrics::gauge!(
+        "certstream_ct_runtime_log_info",
+        "log_id" => log_id.clone(),
+        "description" => log.description.clone(),
+        "operator" => log.operator.clone(),
+        "log_type" => "rfc6962"
+    )
+    .set(1.0);
 
     let health = Arc::new(LogHealth::new());
     let poll_interval = Duration::from_millis(config.poll_interval_ms);
@@ -277,8 +292,8 @@ pub async fn run_watcher_with_cache(log: CtLog, ctx: WatcherContext) {
 
     // Issue #3: Pre-register metric counter handles — eliminates one String allocation
     // per certificate in the hot loop. The handle captures the label at startup time.
-    let counter_messages = metrics::counter!("certstream_messages_sent", "log" => log_name.clone());
-    let counter_parse_failures = metrics::counter!("certstream_parse_failures", "log" => log_name.clone());
+    let counter_messages = metrics::counter!("certstream_messages_sent", "log_id" => log_id.clone());
+    let counter_parse_failures = metrics::counter!("certstream_parse_failures", "log_id" => log_id.clone());
 
     // §1.5a: extension display strings are only consumed by the `full` and
     // `lite` streams; `domains_only` doesn't include them. When neither is
@@ -386,8 +401,16 @@ pub async fn run_watcher_with_cache(log: CtLog, ctx: WatcherContext) {
                 if !resp.status().is_success() {
                     let status = resp.status();
                     if status.as_u16() == 429 {
-                        health.record_rate_limit(config.unhealthy_threshold);
-                        debug!(log = %log.description, "rate limited on get-sth, backing off");
+                        let retry_after_ms =
+                            super::normalize::parse_retry_after(resp.headers(), &log.description);
+                        health.record_rate_limit_with_ms(config.unhealthy_threshold, retry_after_ms);
+                        metrics::counter!(
+                            "certstream_ct_log_rate_limited_total",
+                            "log_id" => log_id.clone(),
+                            "log_type" => "rfc6962"
+                        )
+                        .increment(1);
+                        debug!(log = %log.description, retry_after_ms, "rate limited on get-sth, backing off");
                     } else {
                         health.record_failure(config.unhealthy_threshold);
                         debug!(log = %log.description, status = %status, "get-sth returned error");
@@ -426,7 +449,7 @@ pub async fn run_watcher_with_cache(log: CtLog, ctx: WatcherContext) {
             );
             metrics::counter!(
                 "certstream_rfc6962_tree_size_rollbacks",
-                "log" => log_name.clone()
+                "log_id" => log_id.clone()
             )
             .increment(1);
             health.record_failure(config.unhealthy_threshold);
@@ -460,8 +483,16 @@ pub async fn run_watcher_with_cache(log: CtLog, ctx: WatcherContext) {
                 if !resp.status().is_success() {
                     let status = resp.status();
                     if status.as_u16() == 429 {
-                        health.record_rate_limit(config.unhealthy_threshold);
-                        debug!(log = %log.description, "rate limited by CT log, backing off 30s");
+                        let retry_after_ms =
+                            super::normalize::parse_retry_after(resp.headers(), &log.description);
+                        health.record_rate_limit_with_ms(config.unhealthy_threshold, retry_after_ms);
+                        metrics::counter!(
+                            "certstream_ct_log_rate_limited_total",
+                            "log_id" => log_id.clone(),
+                            "log_type" => "rfc6962"
+                        )
+                        .increment(1);
+                        debug!(log = %log.description, retry_after_ms, "rate limited by CT log, backing off");
                     } else if status.as_u16() == 400 {
                         // Entries not yet available — skip ahead to tree_size
                         debug!(log = %log.description, start = current_index, end = end,
@@ -509,6 +540,12 @@ pub async fn run_watcher_with_cache(log: CtLog, ctx: WatcherContext) {
                             // Empty response means the log has no new entries past current_index.
                             // Expected steady-state when a log is caught up; logged at debug to
                             // avoid drowning the warn channel during normal idle polling.
+                            metrics::counter!(
+                                "certstream_ct_log_empty_responses_total",
+                                "log_id" => log_id.clone(),
+                                "log_type" => "rfc6962"
+                            )
+                            .increment(1);
                             debug!(log = %log_name, "CT log returned empty entries response, retrying");
                             sleep(poll_interval).await;
                             continue;
