@@ -461,6 +461,10 @@ pub fn decompress_tile(data: &[u8]) -> Cow<'_, [u8]> {
     }
 }
 
+fn tail_start(tree_size: u64, overlap: u64) -> u64 {
+    tree_size.saturating_sub(overlap)
+}
+
 /// Static CT (checkpoint + tile protocol) watcher loop.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_static_ct_watcher(log: CtLog, ctx: WatcherContext) {
@@ -589,8 +593,14 @@ pub async fn run_static_ct_watcher(log: CtLog, ctx: WatcherContext) {
             }
         };
         let Some(tree_size) = initial else { return };
-        let start = tree_size.saturating_sub(256);
-        info!(log = %log.description, tree_size, starting_at = start, "starting fresh (static CT)");
+        let start = tail_start(tree_size, config.start_overlap_leaves);
+        info!(
+            log = %log.description,
+            tree_size,
+            overlap = config.start_overlap_leaves,
+            starting_at = start,
+            "starting fresh (static CT)"
+        );
         start
     };
 
@@ -995,6 +1005,18 @@ pub async fn run_static_ct_watcher(log: CtLog, ctx: WatcherContext) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_tail_start_seeds_overlap_behind_head() {
+        assert_eq!(tail_start(1_000_000, 256), 999_744);
+        assert_eq!(tail_start(1_000_000, 0), 1_000_000);
+    }
+
+    #[test]
+    fn test_tail_start_small_log_floors_at_zero() {
+        assert_eq!(tail_start(100, 256), 0);
+        assert_eq!(tail_start(0, 256), 0);
+    }
 
     #[test]
     fn test_parse_checkpoint() {
