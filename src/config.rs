@@ -102,6 +102,10 @@ pub struct CtLogConfig {
     pub batch_size: u64,
     #[serde(default = "default_poll_interval_ms")]
     pub poll_interval_ms: u64,
+    /// Number of leaves a fresh static-CT watcher starts behind the current checkpoint head.
+    /// The default preserves the existing head-256 behavior while making the overlap tunable.
+    #[serde(default = "default_start_overlap_leaves")]
+    pub start_overlap_leaves: u64,
     /// Master switch for the legacy RFC 6962 watcher pool. When `false`, the
     /// Google v3 log list (and any `custom_logs`) are skipped at startup.
     /// Override with `CERTSTREAM_RFC6962_ENABLED`.
@@ -128,11 +132,14 @@ impl Default for CtLogConfig {
             state_file: default_state_file(),
             batch_size: default_batch_size(),
             poll_interval_ms: default_poll_interval_ms(),
+            start_overlap_leaves: default_start_overlap_leaves(),
             rfc6962_enabled: true,
             static_ct_enabled: true,
         }
     }
 }
+
+pub const MAX_START_OVERLAP_LEAVES: u64 = 100_000;
 
 fn default_retry_max_attempts() -> u32 {
     3
@@ -160,6 +167,9 @@ fn default_batch_size() -> u64 {
 }
 fn default_poll_interval_ms() -> u64 {
     1000
+}
+fn default_start_overlap_leaves() -> u64 {
+    256
 }
 fn default_state_file() -> Option<String> {
     Some("certstream_state.json".to_string())
@@ -504,6 +514,7 @@ impl Config {
         env_override!(ct_log.state_file, "CERTSTREAM_CT_LOG_STATE_FILE", some_str);
         env_override!(ct_log.batch_size, "CERTSTREAM_CT_LOG_BATCH_SIZE");
         env_override!(ct_log.poll_interval_ms, "CERTSTREAM_CT_LOG_POLL_INTERVAL_MS");
+        env_override!(ct_log.start_overlap_leaves, "CERTSTREAM_CT_LOG_START_OVERLAP_LEAVES");
         env_override!(ct_log.rfc6962_enabled, "CERTSTREAM_RFC6962_ENABLED");
         env_override!(ct_log.static_ct_enabled, "CERTSTREAM_STATIC_CT_ENABLED");
 
@@ -619,6 +630,16 @@ impl Config {
             });
         }
 
+        if self.ct_log.start_overlap_leaves > MAX_START_OVERLAP_LEAVES {
+            errors.push(ConfigValidationError {
+                field: "ct_log.start_overlap_leaves".to_string(),
+                message: format!(
+                    "Start overlap must be at most {} leaves",
+                    MAX_START_OVERLAP_LEAVES
+                ),
+            });
+        }
+
         if errors.is_empty() {
             Ok(())
         } else {
@@ -711,6 +732,7 @@ mod tests {
         assert_eq!(config.state_file, Some("certstream_state.json".to_string()));
         assert_eq!(config.batch_size, 256);
         assert_eq!(config.poll_interval_ms, 1000);
+        assert_eq!(config.start_overlap_leaves, 256);
         assert!(config.rfc6962_enabled);
         assert!(config.static_ct_enabled);
     }
@@ -887,12 +909,31 @@ port: 9090
 retry_max_attempts: 5
 state_file: "my_state.json"
 batch_size: 512
+start_overlap_leaves: 1024
 "#;
         let config: CtLogConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.retry_max_attempts, 5);
         assert_eq!(config.state_file, Some("my_state.json".to_string()));
         assert_eq!(config.batch_size, 512);
+        assert_eq!(config.start_overlap_leaves, 1024);
         assert_eq!(config.retry_initial_delay_ms, 1000);
+    }
+
+    #[test]
+    fn test_validate_start_overlap_leaves_bound() {
+        let config = Config {
+            ct_log: CtLogConfig {
+                start_overlap_leaves: MAX_START_OVERLAP_LEAVES + 1,
+                ..CtLogConfig::default()
+            },
+            ..test_config()
+        };
+        let result = config.validate();
+        assert!(result.is_err());
+        let errors = result.unwrap_err();
+        assert!(errors
+            .iter()
+            .any(|e| e.field == "ct_log.start_overlap_leaves"));
     }
 
     #[test]
