@@ -1,4 +1,5 @@
 mod log_list;
+mod normalize;
 mod parser;
 pub mod static_ct;
 pub mod watcher;

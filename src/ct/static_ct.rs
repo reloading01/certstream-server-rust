@@ -491,10 +491,22 @@ pub async fn run_static_ct_watcher(log: CtLog, ctx: WatcherContext) {
             .to_string()
     });
     let log_name = log.description.clone();
+    let source_id = super::normalize::source_id(log.log_id.as_deref(), &base_url);
+    let log_id_label = log.log_id.clone().unwrap_or_default();
     let source = Arc::new(Source {
         name: Arc::from(log.description.as_str()),
         url: Arc::from(base_url.as_str()),
     });
+
+    metrics::gauge!(
+        "certstream_ct_runtime_log_info",
+        "source_id" => source_id.clone(),
+        "log_id" => log_id_label,
+        "log" => log_name.clone(),
+        "operator" => log.operator.clone(),
+        "log_type" => "static_ct"
+    )
+    .set(1.0);
 
     let health = Arc::new(LogHealth::new());
     // P1 fix: use the SHARED issuer cache from WatcherContext instead of
@@ -507,10 +519,32 @@ pub async fn run_static_ct_watcher(log: CtLog, ctx: WatcherContext) {
     let timeout = Duration::from_secs(config.request_timeout_secs);
 
     // Issue #3: Pre-register metric handles — no String allocation per certificate.
-    let counter_tiles = metrics::counter!("certstream_static_ct_tiles_fetched", "log" => log_name.clone());
-    let counter_parse_failures = metrics::counter!("certstream_static_ct_parse_failures", "log" => log_name.clone());
-    let counter_entries_parsed = metrics::counter!("certstream_static_ct_entries_parsed", "log" => log_name.clone());
-    let counter_messages = metrics::counter!("certstream_messages_sent", "log" => log_name.clone());
+    let counter_tiles = metrics::counter!(
+        "certstream_static_ct_tiles_fetched",
+        "log" => log_name.clone(),
+        "source_id" => source_id.clone()
+    );
+    let counter_parse_failures = metrics::counter!(
+        "certstream_static_ct_parse_failures",
+        "log" => log_name.clone(),
+        "source_id" => source_id.clone()
+    );
+    let counter_entries_parsed = metrics::counter!(
+        "certstream_static_ct_entries_parsed",
+        "log" => log_name.clone(),
+        "source_id" => source_id.clone()
+    );
+    let counter_messages = metrics::counter!(
+        "certstream_messages_sent",
+        "log" => log_name.clone(),
+        "source_id" => source_id.clone()
+    );
+    let counter_checkpoint_errors = metrics::counter!(
+        "certstream_static_ct_checkpoint_errors",
+        "log" => log_name.clone(),
+        "source_id" => source_id.clone()
+    );
+    counter_checkpoint_errors.increment(0);
 
     // §1.5a: skip extension display-string parsing when neither full nor lite
     // is subscribed at the config level. all_domains still populates from SAN.
@@ -572,7 +606,7 @@ pub async fn run_static_ct_watcher(log: CtLog, ctx: WatcherContext) {
                             error = %reason,
                             "initial checkpoint fetch failed after retries, exiting watcher"
                         );
-                        metrics::counter!("certstream_static_ct_checkpoint_errors").increment(1);
+                        counter_checkpoint_errors.increment(1);
                         metrics::counter!("certstream_worker_init_failures").increment(1);
                         break None;
                     }
@@ -621,16 +655,18 @@ pub async fn run_static_ct_watcher(log: CtLog, ctx: WatcherContext) {
             Ok(resp) => {
                 let status = resp.status();
                 if status.as_u16() == 429 {
-                    let retry_after_ms = resp
-                        .headers()
-                        .get("retry-after")
-                        .and_then(|v| v.to_str().ok())
-                        .and_then(|s| s.parse::<u64>().ok())
-                        .map(|secs| secs.saturating_mul(1_000))
-                        .unwrap_or(LogHealth::RATE_LIMIT_BACKOFF_MS);
+                    let retry_after_ms =
+                        super::normalize::parse_retry_after(resp.headers(), &log.description);
                     health.record_rate_limit_with_ms(config.unhealthy_threshold, retry_after_ms);
+                    metrics::counter!(
+                        "certstream_ct_log_rate_limited_total",
+                        "log" => log_name.clone(),
+                        "source_id" => source_id.clone(),
+                        "log_type" => "static_ct"
+                    )
+                    .increment(1);
                     debug!(log = %log.description, retry_after_ms, "rate limited on checkpoint fetch, backing off");
-                    metrics::counter!("certstream_static_ct_checkpoint_errors").increment(1);
+                    counter_checkpoint_errors.increment(1);
                     sleep(health.get_backoff()).await;
                     continue;
                 }
@@ -640,7 +676,7 @@ pub async fn run_static_ct_watcher(log: CtLog, ctx: WatcherContext) {
                     }
                     health.record_failure(config.unhealthy_threshold);
                     debug!(log = %log.description, %status, "checkpoint fetch returned non-success");
-                    metrics::counter!("certstream_static_ct_checkpoint_errors").increment(1);
+                    counter_checkpoint_errors.increment(1);
                     sleep(health.get_backoff()).await;
                     continue;
                 }
@@ -656,7 +692,7 @@ pub async fn run_static_ct_watcher(log: CtLog, ctx: WatcherContext) {
                         None => {
                             health.record_failure(config.unhealthy_threshold);
                             debug!(log = %log.description, "failed to parse checkpoint");
-                            metrics::counter!("certstream_static_ct_checkpoint_errors").increment(1);
+                            counter_checkpoint_errors.increment(1);
                             sleep(health.get_backoff()).await;
                             continue;
                         }
@@ -664,7 +700,7 @@ pub async fn run_static_ct_watcher(log: CtLog, ctx: WatcherContext) {
                     Err(e) => {
                         health.record_failure(config.unhealthy_threshold);
                         debug!(log = %log.description, error = %e, "failed to read checkpoint");
-                        metrics::counter!("certstream_static_ct_checkpoint_errors").increment(1);
+                        counter_checkpoint_errors.increment(1);
                         sleep(health.get_backoff()).await;
                         continue;
                     }
@@ -676,7 +712,7 @@ pub async fn run_static_ct_watcher(log: CtLog, ctx: WatcherContext) {
                 }
                 health.record_failure(config.unhealthy_threshold);
                 debug!(log = %log.description, error = %e, "failed to fetch checkpoint");
-                metrics::counter!("certstream_static_ct_checkpoint_errors").increment(1);
+                counter_checkpoint_errors.increment(1);
                 sleep(health.get_backoff()).await;
                 continue;
             }
@@ -693,7 +729,12 @@ pub async fn run_static_ct_watcher(log: CtLog, ctx: WatcherContext) {
                 high_water = high_water_tree_size,
                 "tree_size went backwards; refusing to advance"
             );
-            metrics::counter!("certstream_static_ct_tree_size_rollbacks", "log" => log_name.clone()).increment(1);
+            metrics::counter!(
+                "certstream_static_ct_tree_size_rollbacks",
+                "log" => log_name.clone(),
+                "source_id" => source_id.clone()
+            )
+            .increment(1);
             health.record_failure(config.unhealthy_threshold);
             sleep(health.get_backoff()).await;
             continue;
@@ -748,14 +789,16 @@ pub async fn run_static_ct_watcher(log: CtLog, ctx: WatcherContext) {
                     if !resp.status().is_success() {
                         let status = resp.status();
                         if status.as_u16() == 429 {
-                            let retry_after_ms = resp
-                                .headers()
-                                .get("retry-after")
-                                .and_then(|v| v.to_str().ok())
-                                .and_then(|s| s.parse::<u64>().ok())
-                                .map(|secs| secs.saturating_mul(1_000))
-                                .unwrap_or(LogHealth::RATE_LIMIT_BACKOFF_MS);
+                            let retry_after_ms =
+                                super::normalize::parse_retry_after(resp.headers(), &log.description);
                             health.record_rate_limit_with_ms(config.unhealthy_threshold, retry_after_ms);
+                            metrics::counter!(
+                                "certstream_ct_log_rate_limited_total",
+                                "log" => log_name.clone(),
+                                "source_id" => source_id.clone(),
+                                "log_type" => "static_ct"
+                            )
+                            .increment(1);
                             debug!(log = %log.description, retry_after_ms, "rate limited by static CT log, backing off");
                         } else {
                             health.record_failure(config.unhealthy_threshold);
@@ -790,7 +833,8 @@ pub async fn run_static_ct_watcher(log: CtLog, ctx: WatcherContext) {
                                 );
                                 metrics::counter!(
                                     "certstream_static_ct_tile_width_mismatch",
-                                    "log" => log_name.clone()
+                                    "log" => log_name.clone(),
+                                    "source_id" => source_id.clone()
                                 )
                                 .increment(1);
                                 health.record_failure(config.unhealthy_threshold);
@@ -868,7 +912,8 @@ pub async fn run_static_ct_watcher(log: CtLog, ctx: WatcherContext) {
                                     );
                                     metrics::counter!(
                                         "certstream_static_ct_leaf_index_mismatch",
-                                        "log" => log_name.clone()
+                                        "log" => log_name.clone(),
+                                        "source_id" => source_id.clone()
                                     )
                                     .increment(1);
                                 }
