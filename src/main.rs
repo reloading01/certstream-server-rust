@@ -187,7 +187,10 @@ async fn main() {
 
     let rate_limiter = RateLimiter::new(config.rate_limit.clone(), hot_reload_manager.clone());
 
-    info!(url = %config.ct_logs_url, "fetching CT log list");
+    info!(
+        catalog_sources = ?ct::catalog::CATALOG_SOURCE_IDS,
+        "fetching CT log lists from signed-catalog registry"
+    );
 
     if !config.custom_logs.is_empty() {
         info!(count = config.custom_logs.len(), "adding custom CT logs");
@@ -376,10 +379,12 @@ async fn discover_and_spawn(
     use std::collections::HashMap;
     use ct::{LogType, OperatorRateLimiter};
 
+    // Drive the signed-catalog registry. Per-source authority comes from
+    // ct_log.catalog_authority_overrides; signature verification gates auto-spawn.
     let discovered = fetch_log_list(
         &ctx.client,
-        &config.ct_logs_url,
-        &config.additional_log_lists,
+        &ct::catalog::catalog_registry(),
+        &config.ct_log.catalog_authority_overrides,
         config.custom_logs.clone(),
     )
     .await;

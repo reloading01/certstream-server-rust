@@ -1,3 +1,4 @@
+pub mod catalog;
 mod log_list;
 mod normalize;
 mod parser;
