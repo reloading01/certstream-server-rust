@@ -367,13 +367,6 @@ fn spawn_signal_handler(shutdown_token: CancellationToken) {
     });
 }
 
-/// Build a fresh `OperatorRateLimiter` capped at 2 req/s, shared across all
-/// logs of the same operator so a single CDN host doesn't see a thundering
-/// herd from per-shard watchers.
-fn make_operator_limiter() -> ct::OperatorRateLimiter {
-    Arc::new(ct::OperatorLimiter::new(Duration::from_millis(500)))
-}
-
 /// Discovery + spawn pipeline. Returns `(rfc6962_count, static_ct_count)`.
 async fn discover_and_spawn(
     config: &Config,
@@ -488,9 +481,18 @@ fn spawn_pool(
     metrics::gauge!(count_gauge).set(logs.len() as f64);
 
     for log in &logs {
-        operator_limiters
-            .entry(log.operator.to_lowercase())
-            .or_insert_with(make_operator_limiter);
+        // Key by canonical operator name and resolve the interval from config
+        // instead of a hardcoded shared default.
+        let op = ct::normalize_operator(&log.operator);
+        operator_limiters.entry(op.clone()).or_insert_with(|| {
+            let ms = ctx
+                .config
+                .operator_rate_limits
+                .get(&op)
+                .copied()
+                .unwrap_or(ctx.config.default_operator_rate_limit_ms);
+            Arc::new(ct::OperatorLimiter::new(Duration::from_millis(ms)))
+        });
         log_tracker.register(
             log.description.clone(),
             log.normalized_url(),
@@ -502,8 +504,20 @@ fn spawn_pool(
     for (index, log) in logs.into_iter().enumerate() {
         let mut wctx = ctx.clone();
         wctx.rate_limiter = operator_limiters
-            .get(&log.operator.to_lowercase())
+            .get(&ct::normalize_operator(&log.operator))
             .cloned();
+        // Catalog-discovered logs share the global config. Local custom/static
+        // entries with per-log overrides get their own resolved config.
+        if log.batch_size.is_some() || log.poll_interval_ms.is_some() {
+            let mut cfg = (*ctx.config).clone();
+            if let Some(bs) = log.batch_size {
+                cfg.batch_size = bs;
+            }
+            if let Some(pi) = log.poll_interval_ms {
+                cfg.poll_interval_ms = pi;
+            }
+            wctx.config = Arc::new(cfg);
+        }
         spawn_worker_loop(log, wctx, startup_stagger_ms * index as u64, kind);
     }
     count

@@ -38,6 +38,12 @@ macro_rules! env_override {
 pub struct CustomCtLog {
     pub name: String,
     pub url: String,
+    /// Optional per-log overrides; absent entries inherit the global CT log
+    /// batch size and poll interval.
+    #[serde(default)]
+    pub batch_size: Option<u64>,
+    #[serde(default)]
+    pub poll_interval_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -49,6 +55,12 @@ pub struct StaticCtLog {
     /// When absent, the origin is derived from the URL by stripping the scheme and trailing slash.
     #[serde(default)]
     pub log_origin: Option<String>,
+    /// Optional per-log overrides; absent entries inherit the global CT log
+    /// batch size and poll interval.
+    #[serde(default)]
+    pub batch_size: Option<u64>,
+    #[serde(default)]
+    pub poll_interval_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -117,6 +129,15 @@ pub struct CtLogConfig {
     /// Override with `CERTSTREAM_STATIC_CT_ENABLED`.
     #[serde(default = "default_true")]
     pub static_ct_enabled: bool,
+    /// Per-operator outbound rate-limit floor in milliseconds for any operator
+    /// not listed in `operator_rate_limits`.
+    #[serde(default = "default_operator_rate_limit_ms")]
+    pub default_operator_rate_limit_ms: u64,
+    /// Per-operator overrides. Keys are canonicalized at use, so a YAML key like
+    /// "digicert" matches the catalog-emitted operator regardless of case,
+    /// whitespace, or punctuation. Empty map means every operator uses the default.
+    #[serde(default)]
+    pub operator_rate_limits: std::collections::HashMap<String, u64>,
 }
 
 impl Default for CtLogConfig {
@@ -135,11 +156,17 @@ impl Default for CtLogConfig {
             start_overlap_leaves: default_start_overlap_leaves(),
             rfc6962_enabled: true,
             static_ct_enabled: true,
+            default_operator_rate_limit_ms: default_operator_rate_limit_ms(),
+            operator_rate_limits: std::collections::HashMap::new(),
         }
     }
 }
 
 pub const MAX_START_OVERLAP_LEAVES: u64 = 100_000;
+
+fn default_operator_rate_limit_ms() -> u64 {
+    500
+}
 
 fn default_retry_max_attempts() -> u32 {
     3

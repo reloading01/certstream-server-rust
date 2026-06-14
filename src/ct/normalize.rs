@@ -66,6 +66,31 @@ pub(super) fn parse_retry_after(headers: &HeaderMap, log_description: &str) -> u
     }
 }
 
+/// Canonicalize a CT Log Provider operator name for keying. Lowercases, trims,
+/// collapses internal whitespace to a single space, and drops punctuation. So
+/// `"DigiCert, Inc."` and `"DigiCert Inc"` resolve to the same operator slot.
+pub fn normalize_operator(operator: &str) -> String {
+    let mut out = String::with_capacity(operator.len());
+    let mut pending_space = false;
+    for c in operator.chars() {
+        if c.is_whitespace() {
+            // Defer the separator so leading/trailing/internal runs collapse.
+            if !out.is_empty() {
+                pending_space = true;
+            }
+        } else if c.is_alphanumeric() {
+            if pending_space {
+                out.push(' ');
+                pending_space = false;
+            }
+            out.extend(c.to_lowercase());
+        }
+        // Punctuation (',', '.', '(', ')', '\'', …) is dropped, NOT treated as
+        // a separator — "DigiCert, Inc" and "DigiCert Inc" must coincide.
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -132,5 +157,13 @@ mod tests {
             source_id(Some(""), "https://ct.example.com/log"),
             "url:https://ct.example.com/log"
         );
+    }
+
+    #[test]
+    fn normalize_operator_collapses_case_whitespace_punctuation() {
+        assert_eq!(normalize_operator("DigiCert, Inc."), "digicert inc");
+        assert_eq!(normalize_operator("digicert inc"), "digicert inc");
+        assert_eq!(normalize_operator("  DigiCert   Inc  "), "digicert inc");
+        assert_eq!(normalize_operator("Let's Encrypt"), "lets encrypt");
     }
 }
