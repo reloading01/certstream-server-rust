@@ -360,11 +360,28 @@ pub async fn fetch_log_list(
     catalogs: &[Box<dyn SignedCatalog>],
     authority_overrides: &HashMap<String, bool>,
     custom_logs: Vec<CustomCtLog>,
+    request_timeout: Duration,
 ) -> Result<Vec<CtLog>, LogListError> {
-    // Fetch + verify every catalog concurrently.
-    let fetches = catalogs.iter().map(|cat| {
-        let client = client.clone();
-        async move { (cat, catalog::fetch_and_verify(&client, cat.as_ref()).await) }
+    // Apple has no detached signature, so it is fetched through a dedicated
+    // client that pins the issuer-CA SPKI on top of WebPKI validation. If that
+    // client cannot be built, Apple is skipped this cycle rather than fetched
+    // unpinned. Apple is non-authoritative, so skipping has no spawn impact.
+    let apple_client = match catalog::build_apple_pinned_client(request_timeout) {
+        Ok(c) => Some(c),
+        Err(e) => {
+            warn!(error = %e, "failed to build TLS-pinned Apple client; skipping the Apple catalog this cycle");
+            None
+        }
+    };
+
+    // Fetch + verify every catalog concurrently (Apple via the pinned client).
+    let fetches = catalogs.iter().filter_map(|cat| {
+        let fetch_client = if cat.name() == "apple" {
+            apple_client.clone()?
+        } else {
+            client.clone()
+        };
+        Some(async move { (cat, catalog::fetch_and_verify(&fetch_client, cat.as_ref()).await) })
     });
     let results = join_all(fetches).await;
 

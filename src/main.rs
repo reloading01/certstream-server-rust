@@ -138,6 +138,9 @@ async fn main() {
         // OperatorLimiter); 4 idle per host is enough for retry overlap.
         .pool_max_idle_per_host(2)
         .pool_idle_timeout(Duration::from_secs(30))
+        // Global timeout for catalog list/signature fetches. Watcher fetches
+        // also set per-request bounds; this backstops shared-client requests.
+        .timeout(Duration::from_secs(config.ct_log.request_timeout_secs))
         .tcp_nodelay(true)
         .build()
         .expect("failed to build http client");
@@ -386,6 +389,7 @@ async fn discover_and_spawn(
         &ct::catalog::catalog_registry(),
         &config.ct_log.catalog_authority_overrides,
         config.custom_logs.clone(),
+        Duration::from_secs(config.ct_log.request_timeout_secs),
     )
     .await;
 

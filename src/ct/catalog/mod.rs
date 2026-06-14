@@ -16,10 +16,12 @@
 
 mod apple;
 mod google;
+mod tls_pin;
 mod verify;
 
 pub use apple::Apple;
 pub use google::{GoogleV3All, GoogleV3Usable};
+pub use tls_pin::build_apple_pinned_client;
 pub use verify::VerifyError;
 
 use reqwest::Client;
