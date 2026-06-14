@@ -102,9 +102,9 @@ struct RawTiledLog {
 
 /// Mirror of the v3 log-list `state` object. Prod code only branches on
 /// `rejected`/`retired` today; `pending`/`qualified`/`usable`/`readonly` are
-/// declared so serde recognizes the full lifecycle (B2b's spawn allowlist uses
-/// them). Unknown state keys are captured in `_other` and counted as an unknown
-/// enum rather than silently dropped.
+/// declared so serde recognizes the full lifecycle. Unknown state keys are
+/// captured in `_other` and counted as an unknown enum rather than silently
+/// dropped.
 #[derive(Debug, Clone, Deserialize)]
 #[allow(dead_code)]
 struct LogState {
@@ -184,7 +184,7 @@ impl From<CustomCtLog> for CtLog {
             operator: "Custom".to_string(),
             log_type: LogType::Rfc6962,
             log_origin: None,
-            log_id: None,
+            log_id: custom.expected_log_id,
             batch_size: custom.batch_size,
             poll_interval_ms: custom.poll_interval_ms,
             state: None,
@@ -200,12 +200,56 @@ impl From<StaticCtLog> for CtLog {
             operator: "Static CT".to_string(),
             log_type: LogType::StaticCt,
             log_origin: static_log.log_origin,
-            log_id: None,
+            log_id: static_log.expected_log_id,
             batch_size: static_log.batch_size,
             poll_interval_ms: static_log.poll_interval_ms,
             state: None,
         }
     }
+}
+
+/// Check local log overrides against discovered catalog identity.
+///
+/// A local override that declares an expected CT log ID and matches a discovered
+/// log must agree on the non-replaceable identity fields: transport and
+/// normalized fetch URL. `log_origin` is deliberately not hard-checked because
+/// static-CT monitoring URLs and submission/checkpoint origins commonly differ
+/// (`mon.*` vs `log.*`).
+pub fn local_override_conflicts(discovered: &[CtLog], overrides: &[CtLog]) -> Vec<String> {
+    let mut by_id: HashMap<&str, &CtLog> = HashMap::new();
+    for log in discovered {
+        if let Some(id) = log.log_id.as_deref().filter(|id| !id.is_empty()) {
+            by_id.insert(id, log);
+        }
+    }
+
+    let mut conflicts = Vec::new();
+    for override_log in overrides {
+        let Some(id) = override_log.log_id.as_deref().filter(|id| !id.is_empty()) else {
+            continue;
+        };
+        let Some(discovered_log) = by_id.get(id) else {
+            continue;
+        };
+
+        if override_log.log_type != discovered_log.log_type {
+            conflicts.push(format!(
+                "override '{}' expected CT log ID {id} has log_type {:?} but discovered log has {:?}",
+                override_log.description, override_log.log_type, discovered_log.log_type
+            ));
+        }
+
+        let override_url = normalize_url(&override_log.url);
+        let discovered_url = normalize_url(&discovered_log.url);
+        if override_url != discovered_url {
+            conflicts.push(format!(
+                "override '{}' expected CT log ID {id} url '{override_url}' disagrees with discovered url '{discovered_url}'",
+                override_log.description
+            ));
+        }
+    }
+
+    conflicts
 }
 
 #[cfg(test)]
@@ -431,8 +475,7 @@ pub async fn fetch_log_list(
         return Err(LogListError::NoLogs);
     }
 
-    // Spawn candidates: runtime-authoritative AND usable (B2a keeps upstream's
-    // rejected/retired denylist; B2b tightens this to the positive allowlist).
+    // Spawn candidates: runtime-authoritative and currently usable.
     let candidate_logs: Vec<CtLog> = merged
         .into_values()
         .filter(|(_, authoritative)| *authoritative)
@@ -559,6 +602,7 @@ mod tests {
         let custom = CustomCtLog {
             name: "My Custom Log".to_string(),
             url: "https://custom.example.com/ct".to_string(),
+            expected_log_id: None,
             batch_size: None,
             poll_interval_ms: None,
         };
@@ -567,7 +611,23 @@ mod tests {
         assert_eq!(ct_log.url, "https://custom.example.com/ct");
         assert_eq!(ct_log.operator, "Custom");
         assert_eq!(ct_log.log_type, LogType::Rfc6962);
+        assert!(ct_log.log_id.is_none());
         assert!(ct_log.state.is_none());
+    }
+
+    #[test]
+    fn test_from_custom_ct_log_preserves_overrides() {
+        let custom = CustomCtLog {
+            name: "My Custom Log".to_string(),
+            url: "https://custom.example.com/ct".to_string(),
+            expected_log_id: Some("custom-log-id".to_string()),
+            batch_size: Some(128),
+            poll_interval_ms: Some(2500),
+        };
+        let ct_log = CtLog::from(custom);
+        assert_eq!(ct_log.log_id.as_deref(), Some("custom-log-id"));
+        assert_eq!(ct_log.batch_size, Some(128));
+        assert_eq!(ct_log.poll_interval_ms, Some(2500));
     }
 
     #[test]
@@ -576,6 +636,7 @@ mod tests {
             name: "LE Willow 2025h2".to_string(),
             url: "https://mon.willow.ct.letsencrypt.org/2025h2d/".to_string(),
             log_origin: Some("log.willow.ct.letsencrypt.org/2025h2d".to_string()),
+            expected_log_id: None,
             batch_size: None,
             poll_interval_ms: None,
         };
@@ -591,7 +652,24 @@ mod tests {
             ct_log.log_origin.as_deref(),
             Some("log.willow.ct.letsencrypt.org/2025h2d")
         );
+        assert!(ct_log.log_id.is_none());
         assert!(ct_log.state.is_none());
+    }
+
+    #[test]
+    fn test_from_static_ct_log_preserves_overrides() {
+        let static_log = StaticCtLog {
+            name: "LE Willow 2025h2".to_string(),
+            url: "https://mon.willow.ct.letsencrypt.org/2025h2d/".to_string(),
+            log_origin: Some("log.willow.ct.letsencrypt.org/2025h2d".to_string()),
+            expected_log_id: Some("static-log-id".to_string()),
+            batch_size: Some(64),
+            poll_interval_ms: Some(3000),
+        };
+        let ct_log = CtLog::from(static_log);
+        assert_eq!(ct_log.log_id.as_deref(), Some("static-log-id"));
+        assert_eq!(ct_log.batch_size, Some(64));
+        assert_eq!(ct_log.poll_interval_ms, Some(3000));
     }
 
     #[test]
@@ -601,8 +679,38 @@ mod tests {
         assert_ne!(LogType::Rfc6962, LogType::StaticCt);
     }
 
-    // The static-ct origin derivation moved to `normalize::normalize_log_origin`
-    // and its behavior is covered by `normalize::tests`.
+    #[test]
+    fn local_override_conflicts_detects_identity_mismatch() {
+        let mut discovered = make_test_log("disc", "https://mon.example.com/log", None);
+        discovered.log_type = LogType::StaticCt;
+        discovered.log_id = Some("logid-x".to_string());
+
+        let mut ok = make_test_log("ok", "https://mon.example.com/log/", None);
+        ok.log_type = LogType::StaticCt;
+        ok.log_id = Some("logid-x".to_string());
+        assert!(
+            local_override_conflicts(std::slice::from_ref(&discovered), &[ok]).is_empty(),
+            "a matching override must not conflict"
+        );
+
+        let mut bad_url = make_test_log("bad-url", "https://other.example.com/log", None);
+        bad_url.log_type = LogType::StaticCt;
+        bad_url.log_id = Some("logid-x".to_string());
+        assert!(
+            !local_override_conflicts(std::slice::from_ref(&discovered), &[bad_url]).is_empty()
+        );
+
+        let mut bad_type = make_test_log("bad-type", "https://mon.example.com/log", None);
+        bad_type.log_type = LogType::Rfc6962;
+        bad_type.log_id = Some("logid-x".to_string());
+        assert!(
+            !local_override_conflicts(std::slice::from_ref(&discovered), &[bad_type]).is_empty()
+        );
+
+        let mut additive = make_test_log("additive", "https://new.example.com/log", None);
+        additive.log_id = Some("logid-y".to_string());
+        assert!(local_override_conflicts(&[discovered], &[additive]).is_empty());
+    }
 
     /// Apple's log list adds `assetVersionV2` and `tiled_logs` and may include
     /// operators with empty (or missing) `logs` arrays. The parser must accept

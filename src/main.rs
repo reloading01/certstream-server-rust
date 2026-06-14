@@ -401,20 +401,52 @@ async fn discover_and_spawn(
         }
     };
 
-    // Splice in the user's static_logs from config. We dedupe by URL so a
-    // user-provided override (e.g. with a custom log_origin) takes precedence
-    // over discovery for the same monitoring URL.
-    let config_static_urls: std::collections::HashSet<String> = config
-        .static_logs
+    // Splice in configured static logs by expected CT log ID when provided.
+    // A configured static log with the same CT log ID as a discovered log
+    // replaces it only if non-replaceable identity fields still agree.
+    let static_overrides: Vec<ct::CtLog> =
+        config.static_logs.iter().cloned().map(ct::CtLog::from).collect();
+    let conflicts = ct::local_override_conflicts(&all_logs, &static_overrides);
+    if !conflicts.is_empty() {
+        for conflict in &conflicts {
+            error!("{conflict}");
+        }
+        error!("static log override conflicts with discovered CT log identity; refusing to start");
+        std::process::exit(1);
+    }
+    let override_ids: std::collections::HashSet<String> = static_overrides
         .iter()
-        .map(|sl| sl.url.trim_end_matches('/').to_string())
+        .filter_map(|log| log.log_id.as_deref().filter(|id| !id.is_empty()))
+        .map(str::to_string)
+        .collect();
+    let override_urls_without_id: std::collections::HashSet<String> = static_overrides
+        .iter()
+        .filter(|log| log.log_id.as_deref().filter(|id| !id.is_empty()).is_none())
+        .map(|log| log.normalized_url())
         .collect();
     all_logs.retain(|l| {
-        l.log_type != LogType::StaticCt
-            || !config_static_urls.contains(l.url.trim_end_matches('/'))
+        let replaced_by_id = l
+            .log_id
+            .as_ref()
+            .map(|id| override_ids.contains(id))
+            .unwrap_or(false);
+        let replaced_by_url = l.log_type == LogType::StaticCt
+            && override_urls_without_id.contains(&l.normalized_url());
+        !(replaced_by_id || replaced_by_url)
     });
-    for sl in &config.static_logs {
-        all_logs.push(ct::CtLog::from(sl.clone()));
+    all_logs.extend(static_overrides);
+
+    {
+        let mut seen = std::collections::HashSet::new();
+        let duplicates: Vec<String> = all_logs
+            .iter()
+            .filter_map(|log| log.log_id.clone())
+            .filter(|id| !seen.insert(id.clone()))
+            .collect();
+        if !duplicates.is_empty() {
+            error!(duplicate_log_ids = ?duplicates, "multiple CT watchers resolved to the same log_id; refusing to start");
+            std::process::exit(1);
+        }
     }
 
     // Partition by type — the two watcher pools differ in protocol.

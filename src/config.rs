@@ -38,6 +38,10 @@ macro_rules! env_override {
 pub struct CustomCtLog {
     pub name: String,
     pub url: String,
+    /// Optional operator-declared base64-encoded CT log ID for runtime
+    /// identity, metrics, and duplicate-log detection.
+    #[serde(default)]
+    pub expected_log_id: Option<String>,
     /// Optional per-log overrides; absent entries inherit the global CT log
     /// batch size and poll interval.
     #[serde(default)]
@@ -55,6 +59,9 @@ pub struct StaticCtLog {
     /// When absent, the origin is derived from the URL by stripping the scheme and trailing slash.
     #[serde(default)]
     pub log_origin: Option<String>,
+    /// Optional expected base64-encoded CT log ID for override validation.
+    #[serde(default)]
+    pub expected_log_id: Option<String>,
     /// Optional per-log overrides; absent entries inherit the global CT log
     /// batch size and poll interval.
     #[serde(default)]
@@ -774,6 +781,9 @@ url: "https://test.example.com/log/"
         let log: StaticCtLog = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(log.name, "Test Log");
         assert_eq!(log.url, "https://test.example.com/log/");
+        assert!(log.expected_log_id.is_none());
+        assert!(log.batch_size.is_none());
+        assert!(log.poll_interval_ms.is_none());
     }
 
     #[test]
@@ -785,6 +795,41 @@ url: "https://custom.example.com/ct"
         let log: CustomCtLog = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(log.name, "Custom Log");
         assert_eq!(log.url, "https://custom.example.com/ct");
+        assert!(log.expected_log_id.is_none());
+        assert!(log.batch_size.is_none());
+        assert!(log.poll_interval_ms.is_none());
+    }
+
+    #[test]
+    fn test_custom_ct_log_deserialize_overrides() {
+        let yaml = r#"
+name: "Custom Log"
+url: "https://custom.example.com/ct"
+expected_log_id: "custom-log-id"
+batch_size: 128
+poll_interval_ms: 2500
+"#;
+        let log: CustomCtLog = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(log.expected_log_id.as_deref(), Some("custom-log-id"));
+        assert_eq!(log.batch_size, Some(128));
+        assert_eq!(log.poll_interval_ms, Some(2500));
+    }
+
+    #[test]
+    fn test_static_ct_log_deserialize_overrides() {
+        let yaml = r#"
+name: "Static Log"
+url: "https://static.example.com/log/"
+log_origin: "static.example.com/log"
+expected_log_id: "static-log-id"
+batch_size: 64
+poll_interval_ms: 3000
+"#;
+        let log: StaticCtLog = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(log.log_origin.as_deref(), Some("static.example.com/log"));
+        assert_eq!(log.expected_log_id.as_deref(), Some("static-log-id"));
+        assert_eq!(log.batch_size, Some(64));
+        assert_eq!(log.poll_interval_ms, Some(3000));
     }
 
     #[test]

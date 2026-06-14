@@ -77,12 +77,17 @@ hot_reload:
   enabled: false
   watch_path: null
 
+# Custom RFC6962 logs can optionally set `expected_log_id`, `batch_size`, and/or
+# `poll_interval_ms`. For custom logs, `expected_log_id` declares the CT log ID
+# used for runtime identity/metrics and duplicate-log detection; it does not
+# replace a catalog-discovered source.
 custom_logs: []
 
 # Static CT logs (Sunlight / static-ct-api protocol). These are merged with logs
-# discovered via the signed-catalog registry (deduped by URL — a config entry
-# overrides discovery, e.g. when you need a custom `log_origin`). This is also
-# the only path to ingest an Apple-only or otherwise non-authoritative log.
+# discovered via the signed-catalog registry. When `expected_log_id` is set, it
+# must match the discovered CT log identity before replacement; id-less entries
+# keep URL-based replacement. This is also the only path to ingest an Apple-only
+# or otherwise non-authoritative log.
 #
 # `url` is the monitoring prefix (often `mon.*`) used to fetch checkpoint and
 # tile data. `log_origin` overrides the expected checkpoint origin when the
@@ -93,3 +98,6 @@ static_logs:
   - name: "Let's Encrypt 'Sycamore' 2026h1"
     url: "https://mon.sycamore.ct.letsencrypt.org/2026h1/"
     log_origin: "log.sycamore.ct.letsencrypt.org/2026h1"
+    # expected_log_id: "base64-sha256-log-id"
+    # batch_size: 128
+    # poll_interval_ms: 2000
