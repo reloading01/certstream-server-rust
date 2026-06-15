@@ -41,6 +41,9 @@ ct_log:
   state_file: "certstream_state.json"
   batch_size: 256
   poll_interval_ms: 1000
+  # Fresh static-CT watchers start this many leaves behind the checkpoint head.
+  # Default preserves the existing head-256 behavior while avoiding full-history replay.
+  start_overlap_leaves: 256
   # Master switches per protocol family. Set `rfc6962_enabled: false` once
   # you've fully cut over to static-ct logs (env: CERTSTREAM_RFC6962_ENABLED).
   rfc6962_enabled: true
