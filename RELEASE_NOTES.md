@@ -1,3 +1,58 @@
+# Release Notes — v1.5.2
+
+**Release date:** June 16, 2026
+
+v1.5.2 replaces URL-configured CT log discovery with a code-owned, signature-verified catalog registry, and adds the runtime controls to operate it safely.
+
+## Trusted CT source discovery
+
+CT log sources now come from a compile-time registry instead of operator-supplied URLs:
+
+* **google_v3_usable** — verified against a pinned RSA-SHA256 trust anchor; authoritative by default.
+* **google_v3_all** — same pinned key; non-authoritative until opted in via `ct_log.catalog_authority_overrides`.
+* **apple** — TLS-authenticated via issuer-CA SPKI pinning (Apple publishes no detached signature); permanently non-authoritative.
+
+Trust model: a source that does not verify can never auto-spawn watchers. An authority override can only *grant* authority to a source that currently verifies — it can never promote an unverified source such as Apple. A signature failure forces the source non-authoritative for that cycle while still exposing the raw bytes for audit (`certstream_ct_catalog_source_verified=0`).
+
+## Operational controls
+
+* Per-operator outbound rate limits: `ct_log.default_operator_rate_limit_ms` + `ct_log.operator_rate_limits`.
+* Per-log overrides: `batch_size` and `poll_interval_ms` on `custom_logs` / `static_logs`.
+* `expected_log_id` guards configured static-CT overrides against the discovered catalog identity (transport, fetch URL, and an explicitly declared checkpoint origin). The server refuses to start if a configured override contradicts the signed catalog, or if multiple resolved watchers would share a CT log ID.
+
+## Breaking change
+
+The `ct_logs_url` and `additional_log_lists` config keys — and the `CERTSTREAM_CT_LOGS_URL` / `CERTSTREAM_ADDITIONAL_LOG_LISTS` env vars — are removed. CT sources are now the code-owned registry. Apple-only or otherwise non-authoritative logs are ingested by declaring them under `static_logs` / `custom_logs`. Existing configs that still set the removed keys are ignored, not rejected.
+
+## New dependencies
+
+`rsa` (catalog signature verification), `rustls` + `rustls-native-certs` (pinned Apple TLS client); `reqwest` gains the `rustls` feature.
+
+---
+
+# Release Notes — v1.5.1
+
+**Release date:** June 15, 2026
+
+A small, focused patch release. Two operational improvements, no breaking changes, fully backward-compatible with v1.5.0 configs and Prometheus queries.
+
+## Configurable static-CT tail overlap
+
+Fresh static-CT watchers previously started at a fixed `tree_size - 256`. The overlap is now tunable:
+
+* `ct_log.start_overlap_leaves` (default `256` — existing behavior preserved)
+* env override `CERTSTREAM_CT_LOG_START_OVERLAP_LEAVES`
+* validated with an upper bound of 100,000 leaves
+
+## CT source observability & retry attribution
+
+* new `certstream_ct_runtime_log_info` gauge (`source_id`, `log_id`, `log`, `operator`, `log_type`)
+* existing per-log metrics gain a stable `source_id` label (`ctlog:<log_id>`, or `url:<...>` for id-less sources) alongside the existing human-readable `log` label — old selectors keep working
+* new `certstream_ct_log_rate_limited_total` (labeled by `log_type`) and `certstream_ct_log_empty_responses_total` counters
+* RFC6962 watchers now honor the `Retry-After` header on 429s (clamped to 250 ms–10 min), matching the static-CT path
+
+---
+
 # Release Notes — v1.5.0
 
 **Release date:** May 19, 2026
