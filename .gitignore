@@ -3,6 +3,10 @@
 *.pem
 *.key
 *.crt
+# Pinned CT-catalog trust anchors are public keys bundled at compile time, so
+# they are committed while TLS server keys remain ignored.
+!src/ct/catalog/keys/*.pem
+!src/ct/catalog/keys/*.crt
 config.yaml
 config.yml
 .DS_Store

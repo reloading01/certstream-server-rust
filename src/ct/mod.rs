@@ -1,3 +1,4 @@
+pub mod catalog;
 mod log_list;
 mod normalize;
 mod parser;
@@ -5,6 +6,7 @@ pub mod static_ct;
 pub mod watcher;
 
 pub use log_list::*;
+pub use normalize::normalize_operator;
 pub use parser::*;
 
 use std::sync::atomic::Ordering;
