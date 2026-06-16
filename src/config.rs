@@ -38,6 +38,16 @@ macro_rules! env_override {
 pub struct CustomCtLog {
     pub name: String,
     pub url: String,
+    /// Optional operator-declared base64-encoded CT log ID for runtime
+    /// identity, metrics, and duplicate-log detection.
+    #[serde(default)]
+    pub expected_log_id: Option<String>,
+    /// Optional per-log overrides; absent entries inherit the global CT log
+    /// batch size and poll interval.
+    #[serde(default)]
+    pub batch_size: Option<u64>,
+    #[serde(default)]
+    pub poll_interval_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -49,6 +59,15 @@ pub struct StaticCtLog {
     /// When absent, the origin is derived from the URL by stripping the scheme and trailing slash.
     #[serde(default)]
     pub log_origin: Option<String>,
+    /// Optional expected base64-encoded CT log ID for override validation.
+    #[serde(default)]
+    pub expected_log_id: Option<String>,
+    /// Optional per-log overrides; absent entries inherit the global CT log
+    /// batch size and poll interval.
+    #[serde(default)]
+    pub batch_size: Option<u64>,
+    #[serde(default)]
+    pub poll_interval_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -117,6 +136,21 @@ pub struct CtLogConfig {
     /// Override with `CERTSTREAM_STATIC_CT_ENABLED`.
     #[serde(default = "default_true")]
     pub static_ct_enabled: bool,
+    /// Per-operator outbound rate-limit floor in milliseconds for any operator
+    /// not listed in `operator_rate_limits`.
+    #[serde(default = "default_operator_rate_limit_ms")]
+    pub default_operator_rate_limit_ms: u64,
+    /// Per-operator overrides. Keys are canonicalized at use, so a YAML key like
+    /// "digicert" matches the catalog-emitted operator regardless of case,
+    /// whitespace, or punctuation. Empty map means every operator uses the default.
+    #[serde(default)]
+    pub operator_rate_limits: std::collections::HashMap<String, u64>,
+    /// Per-catalog-source runtime-authority overrides. Keys are the catalog
+    /// registry source names (`google_v3_usable`, `google_v3_all`, `apple`).
+    /// An override can only grant authority to a source that currently verifies;
+    /// it cannot promote an unverified source. Unknown keys are ignored.
+    #[serde(default)]
+    pub catalog_authority_overrides: std::collections::HashMap<String, bool>,
 }
 
 impl Default for CtLogConfig {
@@ -135,11 +169,18 @@ impl Default for CtLogConfig {
             start_overlap_leaves: default_start_overlap_leaves(),
             rfc6962_enabled: true,
             static_ct_enabled: true,
+            default_operator_rate_limit_ms: default_operator_rate_limit_ms(),
+            operator_rate_limits: std::collections::HashMap::new(),
+            catalog_authority_overrides: std::collections::HashMap::new(),
         }
     }
 }
 
 pub const MAX_START_OVERLAP_LEAVES: u64 = 100_000;
+
+fn default_operator_rate_limit_ms() -> u64 {
+    500
+}
 
 fn default_retry_max_attempts() -> u32 {
     3
@@ -369,12 +410,6 @@ pub struct Config {
     pub port: u16,
     pub log_level: String,
     pub buffer_size: usize,
-    pub ct_logs_url: String,
-    /// Additional log-list URLs to fetch in parallel and merge with the primary
-    /// list. Apple's `current_log_list.json` is the canonical second source: it
-    /// surfaces `tiled_logs` for static-ct-api operators that may not yet appear
-    /// in Google's v3 list. Logs appearing in both lists are deduped by `log_id`.
-    pub additional_log_lists: Vec<String>,
     pub tls_cert: Option<String>,
     pub tls_key: Option<String>,
     pub custom_logs: Vec<CustomCtLog>,
@@ -397,9 +432,6 @@ struct YamlConfig {
     port: Option<u16>,
     log_level: Option<String>,
     buffer_size: Option<usize>,
-    ct_logs_url: Option<String>,
-    #[serde(default)]
-    additional_log_lists: Vec<String>,
     tls_cert: Option<String>,
     tls_key: Option<String>,
     #[serde(default)]
@@ -466,31 +498,7 @@ impl Config {
             .or(yaml_config.buffer_size)
             .unwrap_or(1000);
 
-        let ct_logs_url = env::var("CERTSTREAM_CT_LOGS_URL")
-            .ok()
-            .or(yaml_config.ct_logs_url)
-            .unwrap_or_else(|| {
-                "https://www.gstatic.com/ct/log_list/v3/log_list.json".to_string()
-            });
-
-        // Comma-separated env override; falls back to YAML; otherwise defaults
-        // to Apple's canonical list. Pass an empty string in the env to opt
-        // out (e.g. CERTSTREAM_ADDITIONAL_LOG_LISTS=).
-        let additional_log_lists: Vec<String> = match env::var("CERTSTREAM_ADDITIONAL_LOG_LISTS") {
-            Ok(v) if v.trim().is_empty() => Vec::new(),
-            Ok(v) => v
-                .split(',')
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect(),
-            Err(_) => {
-                if !yaml_config.additional_log_lists.is_empty() {
-                    yaml_config.additional_log_lists
-                } else {
-                    vec!["https://valid.apple.com/ct/log_list/current_log_list.json".to_string()]
-                }
-            }
-        };
+        // CT log sources are provided by the code-owned signed-catalog registry.
 
         let tls_cert = env::var("CERTSTREAM_TLS_CERT").ok().or(yaml_config.tls_cert);
         let tls_key = env::var("CERTSTREAM_TLS_KEY").ok().or(yaml_config.tls_key);
@@ -554,8 +562,6 @@ impl Config {
             port,
             log_level,
             buffer_size,
-            ct_logs_url,
-            additional_log_lists,
             tls_cert,
             tls_key,
             custom_logs: yaml_config.custom_logs,
@@ -587,13 +593,6 @@ impl Config {
             errors.push(ConfigValidationError {
                 field: "buffer_size".to_string(),
                 message: "Buffer size must be greater than 0".to_string(),
-            });
-        }
-
-        if self.ct_logs_url.is_empty() {
-            errors.push(ConfigValidationError {
-                field: "ct_logs_url".to_string(),
-                message: "CT logs URL cannot be empty".to_string(),
             });
         }
 
@@ -694,8 +693,6 @@ mod tests {
             port: 8080,
             log_level: "info".to_string(),
             buffer_size: 1000,
-            ct_logs_url: "https://example.com".to_string(),
-            additional_log_lists: vec![],
             tls_cert: None,
             tls_key: None,
             custom_logs: vec![],
@@ -784,6 +781,9 @@ url: "https://test.example.com/log/"
         let log: StaticCtLog = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(log.name, "Test Log");
         assert_eq!(log.url, "https://test.example.com/log/");
+        assert!(log.expected_log_id.is_none());
+        assert!(log.batch_size.is_none());
+        assert!(log.poll_interval_ms.is_none());
     }
 
     #[test]
@@ -795,6 +795,41 @@ url: "https://custom.example.com/ct"
         let log: CustomCtLog = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(log.name, "Custom Log");
         assert_eq!(log.url, "https://custom.example.com/ct");
+        assert!(log.expected_log_id.is_none());
+        assert!(log.batch_size.is_none());
+        assert!(log.poll_interval_ms.is_none());
+    }
+
+    #[test]
+    fn test_custom_ct_log_deserialize_overrides() {
+        let yaml = r#"
+name: "Custom Log"
+url: "https://custom.example.com/ct"
+expected_log_id: "custom-log-id"
+batch_size: 128
+poll_interval_ms: 2500
+"#;
+        let log: CustomCtLog = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(log.expected_log_id.as_deref(), Some("custom-log-id"));
+        assert_eq!(log.batch_size, Some(128));
+        assert_eq!(log.poll_interval_ms, Some(2500));
+    }
+
+    #[test]
+    fn test_static_ct_log_deserialize_overrides() {
+        let yaml = r#"
+name: "Static Log"
+url: "https://static.example.com/log/"
+log_origin: "static.example.com/log"
+expected_log_id: "static-log-id"
+batch_size: 64
+poll_interval_ms: 3000
+"#;
+        let log: StaticCtLog = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(log.log_origin.as_deref(), Some("static.example.com/log"));
+        assert_eq!(log.expected_log_id.as_deref(), Some("static-log-id"));
+        assert_eq!(log.batch_size, Some(64));
+        assert_eq!(log.poll_interval_ms, Some(3000));
     }
 
     #[test]
@@ -869,15 +904,6 @@ port: 9090
         assert!(result.is_err());
         let errors = result.unwrap_err();
         assert!(errors.iter().any(|e| e.field == "buffer_size"));
-    }
-
-    #[test]
-    fn test_validate_empty_ct_logs_url() {
-        let config = Config {
-            ct_logs_url: "".to_string(),
-            ..test_config()
-        };
-        assert!(config.validate().is_err());
     }
 
     #[test]

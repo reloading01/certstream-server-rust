@@ -3,16 +3,11 @@ port: 8080
 log_level: "info"
 buffer_size: 1000
 
-# Primary CT log list (Google v3 schema). Carries both legacy `logs[]` and
-# static-ct-api `tiled_logs[]` entries.
-ct_logs_url: "https://www.gstatic.com/ct/log_list/v3/log_list.json"
-
-# Additional log-list URLs fetched in parallel and merged with the primary list.
-# Logs that appear in multiple lists are deduped by `log_id`. Apple's list is
-# the canonical second source for static-ct-api operators in 2026; remove the
-# entry (or pass an empty `CERTSTREAM_ADDITIONAL_LOG_LISTS=`) to opt out.
-additional_log_lists:
-  - "https://valid.apple.com/ct/log_list/current_log_list.json"
+# CT log sources are loaded from a code-owned catalog registry:
+#   - google_v3_usable  (RSA-SHA256 verified; authoritative by default)
+#   - google_v3_all     (RSA-SHA256 verified; non-authoritative by default)
+#   - apple             (TLS-authenticated, no detached signature; non-authoritative by default)
+# Tune per-source authority via `ct_log.catalog_authority_overrides` below.
 
 protocols:
   websocket: true
@@ -48,6 +43,16 @@ ct_log:
   # you've fully cut over to static-ct logs (env: CERTSTREAM_RFC6962_ENABLED).
   rfc6962_enabled: true
   static_ct_enabled: true
+  # Per-operator outbound rate limit. default_operator_rate_limit_ms applies to
+  # any operator absent from operator_rate_limits.
+  default_operator_rate_limit_ms: 500
+  operator_rate_limits: {}
+  # Per-catalog-source runtime-authority overrides. Keys are
+  # google_v3_usable, google_v3_all, and apple. An override can only grant
+  # authority to a source that currently verifies; it cannot promote an
+  # unverified source. Example: opt into the broader Google all list with
+  # `google_v3_all: true`.
+  catalog_authority_overrides: {}
 
 # Cross-log certificate dedup. Defaults sized for the 2026 RFC6962/static-ct
 # transition where the same cert appears in 3-4 logs in tight 60s MMD windows.
@@ -72,11 +77,17 @@ hot_reload:
   enabled: false
   watch_path: null
 
+# Custom RFC6962 logs can optionally set `expected_log_id`, `batch_size`, and/or
+# `poll_interval_ms`. For custom logs, `expected_log_id` declares the CT log ID
+# used for runtime identity/metrics and duplicate-log detection; it does not
+# replace a catalog-discovered source.
 custom_logs: []
 
 # Static CT logs (Sunlight / static-ct-api protocol). These are merged with logs
-# discovered via `ct_logs_url` and `additional_log_lists` (deduped by URL — a
-# config entry overrides discovery, e.g. when you need a custom `log_origin`).
+# discovered via the signed-catalog registry. When `expected_log_id` is set, it
+# must match the discovered CT log identity before replacement; id-less entries
+# keep URL-based replacement. This is also the only path to ingest an Apple-only
+# or otherwise non-authoritative log.
 #
 # `url` is the monitoring prefix (often `mon.*`) used to fetch checkpoint and
 # tile data. `log_origin` overrides the expected checkpoint origin when the
@@ -87,3 +98,6 @@ static_logs:
   - name: "Let's Encrypt 'Sycamore' 2026h1"
     url: "https://mon.sycamore.ct.letsencrypt.org/2026h1/"
     log_origin: "log.sycamore.ct.letsencrypt.org/2026h1"
+    # expected_log_id: "base64-sha256-log-id"
+    # batch_size: 128
+    # poll_interval_ms: 2000

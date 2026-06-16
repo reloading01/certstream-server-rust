@@ -135,10 +135,11 @@ impl LogHealth {
         }
     }
 
-    /// Like [`record_rate_limit`], but uses the backoff duration provided by the server's
-    /// `Retry-After` header instead of the hardcoded default. `backoff_ms` is the header
-    /// value converted to milliseconds; falls back to `RATE_LIMIT_BACKOFF_MS` at the call
-    /// site when the header is absent or unparseable.
+    /// Record a 429/rate-limit using the backoff duration the server gave us in
+    /// its `Retry-After` header (parsed + clamped by
+    /// [`crate::ct::normalize::parse_retry_after`]). `backoff_ms` is already
+    /// canonicalized; the caller passes `RATE_LIMIT_BACKOFF_MS` (30s) when the
+    /// header is absent or unparseable.
     pub fn record_rate_limit_with_ms(&self, unhealthy_threshold: u32, backoff_ms: u64) {
         if backoff_ms == Self::RATE_LIMIT_BACKOFF_MS {
             self.record_rate_limit(unhealthy_threshold);

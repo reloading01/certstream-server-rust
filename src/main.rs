@@ -138,6 +138,9 @@ async fn main() {
         // OperatorLimiter); 4 idle per host is enough for retry overlap.
         .pool_max_idle_per_host(2)
         .pool_idle_timeout(Duration::from_secs(30))
+        // Global timeout for catalog list/signature fetches. Watcher fetches
+        // also set per-request bounds; this backstops shared-client requests.
+        .timeout(Duration::from_secs(config.ct_log.request_timeout_secs))
         .tcp_nodelay(true)
         .build()
         .expect("failed to build http client");
@@ -187,7 +190,10 @@ async fn main() {
 
     let rate_limiter = RateLimiter::new(config.rate_limit.clone(), hot_reload_manager.clone());
 
-    info!(url = %config.ct_logs_url, "fetching CT log list");
+    info!(
+        catalog_sources = ?ct::catalog::CATALOG_SOURCE_IDS,
+        "fetching CT log lists from signed-catalog registry"
+    );
 
     if !config.custom_logs.is_empty() {
         info!(count = config.custom_logs.len(), "adding custom CT logs");
@@ -367,13 +373,6 @@ fn spawn_signal_handler(shutdown_token: CancellationToken) {
     });
 }
 
-/// Build a fresh `OperatorRateLimiter` capped at 2 req/s, shared across all
-/// logs of the same operator so a single CDN host doesn't see a thundering
-/// herd from per-shard watchers.
-fn make_operator_limiter() -> ct::OperatorRateLimiter {
-    Arc::new(ct::OperatorLimiter::new(Duration::from_millis(500)))
-}
-
 /// Discovery + spawn pipeline. Returns `(rfc6962_count, static_ct_count)`.
 async fn discover_and_spawn(
     config: &Config,
@@ -383,11 +382,14 @@ async fn discover_and_spawn(
     use std::collections::HashMap;
     use ct::{LogType, OperatorRateLimiter};
 
+    // Drive the signed-catalog registry. Per-source authority comes from
+    // ct_log.catalog_authority_overrides; signature verification gates auto-spawn.
     let discovered = fetch_log_list(
         &ctx.client,
-        &config.ct_logs_url,
-        &config.additional_log_lists,
+        &ct::catalog::catalog_registry(),
+        &config.ct_log.catalog_authority_overrides,
         config.custom_logs.clone(),
+        Duration::from_secs(config.ct_log.request_timeout_secs),
     )
     .await;
 
@@ -399,20 +401,52 @@ async fn discover_and_spawn(
         }
     };
 
-    // Splice in the user's static_logs from config. We dedupe by URL so a
-    // user-provided override (e.g. with a custom log_origin) takes precedence
-    // over discovery for the same monitoring URL.
-    let config_static_urls: std::collections::HashSet<String> = config
-        .static_logs
+    // Splice in configured static logs by expected CT log ID when provided.
+    // A configured static log with the same CT log ID as a discovered log
+    // replaces it only if non-replaceable identity fields still agree.
+    let static_overrides: Vec<ct::CtLog> =
+        config.static_logs.iter().cloned().map(ct::CtLog::from).collect();
+    let conflicts = ct::local_override_conflicts(&all_logs, &static_overrides);
+    if !conflicts.is_empty() {
+        for conflict in &conflicts {
+            error!("{conflict}");
+        }
+        error!("static log override conflicts with discovered CT log identity; refusing to start");
+        std::process::exit(1);
+    }
+    let override_ids: std::collections::HashSet<String> = static_overrides
         .iter()
-        .map(|sl| sl.url.trim_end_matches('/').to_string())
+        .filter_map(|log| log.log_id.as_deref().filter(|id| !id.is_empty()))
+        .map(str::to_string)
+        .collect();
+    let override_urls_without_id: std::collections::HashSet<String> = static_overrides
+        .iter()
+        .filter(|log| log.log_id.as_deref().filter(|id| !id.is_empty()).is_none())
+        .map(|log| log.normalized_url())
         .collect();
     all_logs.retain(|l| {
-        l.log_type != LogType::StaticCt
-            || !config_static_urls.contains(l.url.trim_end_matches('/'))
+        let replaced_by_id = l
+            .log_id
+            .as_ref()
+            .map(|id| override_ids.contains(id))
+            .unwrap_or(false);
+        let replaced_by_url = l.log_type == LogType::StaticCt
+            && override_urls_without_id.contains(&l.normalized_url());
+        !(replaced_by_id || replaced_by_url)
     });
-    for sl in &config.static_logs {
-        all_logs.push(ct::CtLog::from(sl.clone()));
+    all_logs.extend(static_overrides);
+
+    {
+        let mut seen = std::collections::HashSet::new();
+        let duplicates: Vec<String> = all_logs
+            .iter()
+            .filter_map(|log| log.log_id.clone())
+            .filter(|id| !seen.insert(id.clone()))
+            .collect();
+        if !duplicates.is_empty() {
+            error!(duplicate_log_ids = ?duplicates, "multiple CT watchers resolved to the same log_id; refusing to start");
+            std::process::exit(1);
+        }
     }
 
     // Partition by type — the two watcher pools differ in protocol.
@@ -488,9 +522,18 @@ fn spawn_pool(
     metrics::gauge!(count_gauge).set(logs.len() as f64);
 
     for log in &logs {
-        operator_limiters
-            .entry(log.operator.to_lowercase())
-            .or_insert_with(make_operator_limiter);
+        // Key by canonical operator name and resolve the interval from config
+        // instead of a hardcoded shared default.
+        let op = ct::normalize_operator(&log.operator);
+        operator_limiters.entry(op.clone()).or_insert_with(|| {
+            let ms = ctx
+                .config
+                .operator_rate_limits
+                .get(&op)
+                .copied()
+                .unwrap_or(ctx.config.default_operator_rate_limit_ms);
+            Arc::new(ct::OperatorLimiter::new(Duration::from_millis(ms)))
+        });
         log_tracker.register(
             log.description.clone(),
             log.normalized_url(),
@@ -502,8 +545,20 @@ fn spawn_pool(
     for (index, log) in logs.into_iter().enumerate() {
         let mut wctx = ctx.clone();
         wctx.rate_limiter = operator_limiters
-            .get(&log.operator.to_lowercase())
+            .get(&ct::normalize_operator(&log.operator))
             .cloned();
+        // Catalog-discovered logs share the global config. Local custom/static
+        // entries with per-log overrides get their own resolved config.
+        if log.batch_size.is_some() || log.poll_interval_ms.is_some() {
+            let mut cfg = (*ctx.config).clone();
+            if let Some(bs) = log.batch_size {
+                cfg.batch_size = bs;
+            }
+            if let Some(pi) = log.poll_interval_ms {
+                cfg.poll_interval_ms = pi;
+            }
+            wctx.config = Arc::new(cfg);
+        }
         spawn_worker_loop(log, wctx, startup_stagger_ms * index as u64, kind);
     }
     count
