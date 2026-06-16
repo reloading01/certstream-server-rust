@@ -88,6 +88,12 @@ pub fn normalize_operator(operator: &str) -> String {
         // Punctuation (',', '.', '(', ')', '\'', …) is dropped, NOT treated as
         // a separator — "DigiCert, Inc" and "DigiCert Inc" must coincide.
     }
+    // A name with no alphanumerics (e.g. punctuation/emoji only) would collapse
+    // to "" and bucket every such operator together; fall back to a trimmed,
+    // lowercased copy so distinct names stay distinct.
+    if out.is_empty() {
+        return operator.trim().to_lowercase();
+    }
     out
 }
 
@@ -230,6 +236,13 @@ mod tests {
         assert_eq!(normalize_operator("digicert inc"), "digicert inc");
         assert_eq!(normalize_operator("  DigiCert   Inc  "), "digicert inc");
         assert_eq!(normalize_operator("Let's Encrypt"), "lets encrypt");
+    }
+
+    #[test]
+    fn normalize_operator_punctuation_only_falls_back_to_trimmed_lower() {
+        // No alphanumerics: must not collapse distinct names to the same empty key.
+        assert_eq!(normalize_operator("  +.+  "), "+.+");
+        assert_ne!(normalize_operator("+.+"), normalize_operator("-.-"));
     }
 
     #[test]

@@ -211,10 +211,13 @@ impl From<StaticCtLog> for CtLog {
 /// Check local log overrides against discovered catalog identity.
 ///
 /// A local override that declares an expected CT log ID and matches a discovered
-/// log must agree on the non-replaceable identity fields: transport and
-/// normalized fetch URL. `log_origin` is deliberately not hard-checked because
-/// static-CT monitoring URLs and submission/checkpoint origins commonly differ
-/// (`mon.*` vs `log.*`).
+/// log must agree on the non-replaceable identity fields: transport, normalized
+/// fetch URL, and — when the override explicitly declares one — the checkpoint
+/// `log_origin`. An override that omits `log_origin` (deriving it) is not checked,
+/// so the common `mon.*` monitoring vs `log.*` submission split never false-flags;
+/// but an explicitly declared origin that contradicts the signed catalog's
+/// submission origin for the same log ID is a conflict, since the origin is the
+/// static-CT checkpoint signature domain.
 pub fn local_override_conflicts(discovered: &[CtLog], overrides: &[CtLog]) -> Vec<String> {
     let mut by_id: HashMap<&str, &CtLog> = HashMap::new();
     for log in discovered {
@@ -246,6 +249,21 @@ pub fn local_override_conflicts(discovered: &[CtLog], overrides: &[CtLog]) -> Ve
                 "override '{}' expected CT log ID {id} url '{override_url}' disagrees with discovered url '{discovered_url}'",
                 override_log.description
             ));
+        }
+
+        // Only check the origin when the override explicitly declares one; a
+        // derived (None) origin makes no claim to contradict.
+        if let (Some(override_origin), Some(discovered_origin)) =
+            (override_log.log_origin.as_deref(), discovered_log.log_origin.as_deref())
+        {
+            let override_origin = normalize_log_origin(override_origin);
+            let discovered_origin = normalize_log_origin(discovered_origin);
+            if override_origin != discovered_origin {
+                conflicts.push(format!(
+                    "override '{}' expected CT log ID {id} log_origin '{override_origin}' disagrees with discovered log_origin '{discovered_origin}'",
+                    override_log.description
+                ));
+            }
         }
     }
 
@@ -710,6 +728,44 @@ mod tests {
         let mut additive = make_test_log("additive", "https://new.example.com/log", None);
         additive.log_id = Some("logid-y".to_string());
         assert!(local_override_conflicts(&[discovered], &[additive]).is_empty());
+    }
+
+    #[test]
+    fn local_override_conflicts_checks_declared_log_origin() {
+        let mut discovered = make_test_log("disc", "https://mon.example.com/log", None);
+        discovered.log_type = LogType::StaticCt;
+        discovered.log_id = Some("logid-x".to_string());
+        discovered.log_origin = Some("log.example.com/log".to_string());
+
+        // Override declares a contradicting origin for the same log ID → conflict.
+        let mut bad_origin = make_test_log("bad-origin", "https://mon.example.com/log", None);
+        bad_origin.log_type = LogType::StaticCt;
+        bad_origin.log_id = Some("logid-x".to_string());
+        bad_origin.log_origin = Some("https://evil.example.com/log/".to_string());
+        assert!(
+            !local_override_conflicts(std::slice::from_ref(&discovered), &[bad_origin]).is_empty(),
+            "an explicitly declared origin contradicting the catalog must conflict"
+        );
+
+        // Override declares the same origin (differently spelled) → no conflict.
+        let mut ok_origin = make_test_log("ok-origin", "https://mon.example.com/log", None);
+        ok_origin.log_type = LogType::StaticCt;
+        ok_origin.log_id = Some("logid-x".to_string());
+        ok_origin.log_origin = Some("https://log.example.com/log/".to_string());
+        assert!(
+            local_override_conflicts(std::slice::from_ref(&discovered), &[ok_origin]).is_empty(),
+            "a matching origin (modulo normalization) must not conflict"
+        );
+
+        // Override omits the origin (derives it) → not checked, no conflict.
+        let mut derived = make_test_log("derived", "https://mon.example.com/log", None);
+        derived.log_type = LogType::StaticCt;
+        derived.log_id = Some("logid-x".to_string());
+        derived.log_origin = None;
+        assert!(
+            local_override_conflicts(std::slice::from_ref(&discovered), &[derived]).is_empty(),
+            "an override without a declared origin must not conflict"
+        );
     }
 
     /// Apple's log list adds `assetVersionV2` and `tiled_logs` and may include
