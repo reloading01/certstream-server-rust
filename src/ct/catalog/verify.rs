@@ -87,8 +87,8 @@ mod tests {
     }
 
     /// The embedded trust anchor's SPKI fingerprint must match the value
-/// recorded for the embedded Google trust anchor. Guards against a wrong or
-/// rotated key being committed without updating the expected fingerprint.
+    /// recorded for the embedded Google trust anchor. Guards against a wrong or
+    /// rotated key being committed without updating the expected fingerprint.
     #[test]
     fn embedded_key_fingerprint_matches_rfc_record() {
         let pem = include_str!("keys/google_v3_pubkey.pem");

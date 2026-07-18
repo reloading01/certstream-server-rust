@@ -97,8 +97,9 @@ flowchart LR
                         subscriber receives a pointer clone and a zero-copy <code>Utf8Bytes</code> text frame — no
                         re-serialization, no per-client JSON re-encoding. When no clients are connected the serialize step
                         is skipped entirely via a <code>receiver_count() == 0</code> guard. Shared state uses lock-free
-                        <code>DashMap</code> throughout; there are no global read/write mutexes in the hot path. The result
-                        is a roughly 118 MiB stable RSS under load (100 WebSocket clients, 10-minute plateau, ±5 MiB swing).
+                        <code>DashMap</code> throughout; there are no global read/write mutexes in the hot path. CPU-heavy
+                        parsing runs on the blocking pool, and jemalloc keeps resident memory tracking live usage — a flat
+                        RSS plateau under load with no growth over time.
                     </p>
                 </div>
             </div>
@@ -126,7 +127,7 @@ flowchart LR
                     </li>
                     <li>
                         <h4>Fetch entries</h4>
-                        <p>Entries are fetched in batches via <code>/ct/v1/get-entries?start=X&amp;end=Y</code>. Batch size is configurable (default: 256), and the index only advances by the number of entries actually returned.</p>
+                        <p>Entries are fetched via <code>/ct/v1/get-entries?start=X&amp;end=Y</code>, with up to <code>fetch_concurrency</code> windows pipelined per watcher during catch-up. The requested window (default: 1024) adapts to whatever page size the server actually serves, and the index only advances by the number of entries actually returned. Each request pays a token to the per-operator rate-limit bucket, so pipelining never raises the sustained request rate.</p>
                     </li>
                     <li>
                         <h4>Track health</h4>
@@ -158,7 +159,7 @@ flowchart LR
                 <ol class="step-list">
                     <li>
                         <h4>Fetch checkpoint</h4>
-                        <p>Polls <code>/checkpoint</code> for the current tree size. Checkpoints are signed text files carrying origin, tree size, and root hash.</p>
+                        <p>Polls <code>/checkpoint</code> for the current tree size. Checkpoints are signed text files carrying origin, tree size, and root hash. The log's ECDSA P-256 signature is verified against the key from the signed catalog; <code>warn</code> mode (default) counts failures, <code>enforce</code> mode rejects checkpoints whose signature fails.</p>
                     </li>
                     <li>
                         <h4>Calculate tile range</h4>
@@ -174,7 +175,7 @@ flowchart LR
                     </li>
                     <li>
                         <h4>Fetch issuer certificates</h4>
-                        <p>Chain certificates are referenced by SHA-256 fingerprint, fetched from <code>/issuer/&lt;hex&gt;</code> and stored in a single shared, DashMap-based issuer cache.</p>
+                        <p>Chain certificates are referenced by SHA-256 fingerprint, fetched from <code>/issuer/&lt;hex&gt;</code> and stored <em>pre-parsed</em> in a single issuer cache shared by all watchers — every leaf that chains to the same intermediate reuses one parsed <code>Arc&lt;ChainCert&gt;</code> instead of re-parsing the DER. Unparseable issuer blobs are negative-cached so they are fetched at most once.</p>
                     </li>
                     <li>
                         <h4>Dedup and broadcast</h4>
@@ -204,10 +205,11 @@ flowchart LR
                         The same certificate often appears in multiple CT logs at once. The dedup filter uses a
                         <code>DashMap&lt;[u8; 32], Instant&gt;</code> keyed by the raw 32-byte SHA-256 digest stored directly
                         in <code>LeafCert::sha256_raw</code> — a fixed-size, stack-allocated key that avoids one heap
-                        allocation per lookup compared with a <code>String</code> key. The first occurrence passes through;
+                        allocation per lookup compared with a <code>String</code> key, hashed with ahash since the digest
+                        is already uniformly distributed. The first occurrence passes through;
                         duplicates within the TTL window are discarded. The default window is 900 seconds (15 minutes) with
-                        a default capacity of 200K entries, both tunable. A background task prunes expired entries every 60
-                        seconds rather than wiping the cache on overflow.
+                        a default capacity of 200K entries, both tunable. A background task prunes expired entries
+                        periodically rather than wiping the cache on overflow.
                     </p>
                 </div>
             </div>

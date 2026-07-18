@@ -493,7 +493,9 @@ docker compose up -d</pre>
                         <tr><td><code>CERTSTREAM_CT_LOG_STATE_FILE</code></td><td>certstream_state.json</td><td>State file path</td></tr>
                         <tr><td><code>CERTSTREAM_CT_LOG_RETRY_MAX_ATTEMPTS</code></td><td>3</td><td>Max retry attempts</td></tr>
                         <tr><td><code>CERTSTREAM_CT_LOG_REQUEST_TIMEOUT_SECS</code></td><td>30</td><td>Request timeout</td></tr>
-                        <tr><td><code>CERTSTREAM_CT_LOG_BATCH_SIZE</code></td><td>256</td><td>Entries per batch</td></tr>
+                        <tr><td><code>CERTSTREAM_CT_LOG_BATCH_SIZE</code></td><td>1024</td><td>Entries requested per get-entries call (servers clamp to their own max)</td></tr>
+                        <tr><td><code>CERTSTREAM_CT_LOG_FETCH_CONCURRENCY</code></td><td>4</td><td>Concurrent range/tile fetches per watcher during catch-up (1-16)</td></tr>
+                        <tr><td><code>CERTSTREAM_STATIC_CT_CHECKPOINT_SIGNATURE</code></td><td>warn</td><td>Checkpoint signature policy: <code>warn</code> or <code>enforce</code></td></tr>
                         <tr><td><code>CERTSTREAM_DEDUP_CAPACITY</code></td><td>200000</td><td>Cross-log dedup capacity</td></tr>
                         <tr><td><code>CERTSTREAM_DEDUP_TTL_SECS</code></td><td>900</td><td>Dedup window (seconds)</td></tr>
                     </tbody>
@@ -542,7 +544,8 @@ docker compose up -d</pre>
 
 <span class="str">ct_log</span>:
   <span class="str">state_file</span>: <span class="str">"/data/state.json"</span>
-  <span class="str">batch_size</span>: <span class="var">256</span>
+  <span class="str">batch_size</span>: <span class="var">1024</span>
+  <span class="str">fetch_concurrency</span>: <span class="var">4</span>
   <span class="str">poll_interval_ms</span>: <span class="var">500</span>
   <span class="str">retry_max_attempts</span>: <span class="var">3</span>
   <span class="str">request_timeout_secs</span>: <span class="var">30</span>
@@ -588,17 +591,17 @@ docker compose up -d</pre>
                 <div class="section-header">
                     <span class="eyebrow">Performance</span>
                     <h2>What to expect under load</h2>
-                    <p>Default config, 100 concurrent WebSocket clients on the lite stream, 10-minute plateau window.</p>
+                    <p>v1.5.3 vs v1.5.2 on the same host — default config, 100 concurrent WebSocket clients on the lite stream, 10-minute plateau window.</p>
                 </div>
                 <div class="stat-grid">
-                    <div class="stat-cell"><div class="num">~118<span class="unit">MiB</span></div><div class="lbl">Stable RSS · 100 clients</div></div>
-                    <div class="stat-cell"><div class="num">±5<span class="unit">MiB</span></div><div class="lbl">Plateau swing</div></div>
-                    <div class="stat-cell"><div class="num">~13<span class="unit">%</span></div><div class="lbl">CPU · 100 clients</div></div>
-                    <div class="stat-cell"><div class="num">~1K<span class="unit">/s</span></div><div class="lbl">Sustained ingest</div></div>
+                    <div class="stat-cell"><div class="num">+70<span class="unit">%</span></div><div class="lbl">Sustained throughput vs v1.5.2</div></div>
+                    <div class="stat-cell"><div class="num">−50<span class="unit">%</span></div><div class="lbl">CPU per delivered message</div></div>
+                    <div class="stat-cell"><div class="num">0</div><div class="lbl">Copies per subscriber broadcast</div></div>
+                    <div class="stat-cell"><div class="num">flat</div><div class="lbl">RSS over time · returns to baseline after bursts</div></div>
                 </div>
                 <p style="margin-top: 24px; color: var(--ink-3); font-size: 0.9rem; max-width: 70ch;">
-                    Memory plateaus within roughly five minutes of startup and holds flat — no growth over time. Reproduce
-                    these numbers locally with the scripts in <code>soak/</code>.
+                    Memory plateaus shortly after startup and holds flat — no growth over time, and catch-up bursts
+                    no longer park RSS at the high-water mark.
                 </p>
             </div>
         </section>
@@ -628,6 +631,9 @@ docker compose up -d</pre>
                         <tr><td><code>certstream_static_ct_tiles_fetched</code></td><td>counter</td><td>Tiles fetched from static CT logs</td></tr>
                         <tr><td><code>certstream_static_ct_entries_parsed</code></td><td>counter</td><td>Entries parsed from tiles</td></tr>
                         <tr><td><code>certstream_static_ct_checkpoint_errors</code></td><td>counter</td><td>Checkpoint fetch / parse failures</td></tr>
+                        <tr><td><code>certstream_static_ct_checkpoint_sig_verified</code></td><td>counter</td><td>Checkpoint signatures verified</td></tr>
+                        <tr><td><code>certstream_static_ct_checkpoint_sig_failed</code></td><td>counter</td><td>Checkpoint signatures that failed verification</td></tr>
+                        <tr><td><code>certstream_static_ct_checkpoint_sig_unverifiable</code></td><td>counter</td><td>Checkpoints with no usable verification key</td></tr>
                         <tr><td><code>certstream_issuer_cache_size</code></td><td>gauge</td><td>Cached issuer certificates</td></tr>
                         <tr><td><code>certstream_duplicates_filtered</code></td><td>counter</td><td>Duplicate certificates filtered by dedup</td></tr>
                         <tr><td><code>certstream_dedup_cache_size</code></td><td>gauge</td><td>Current dedup cache entries</td></tr>

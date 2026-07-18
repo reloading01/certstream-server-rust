@@ -2,19 +2,14 @@
 FROM rust:1.95-alpine AS builder
 ARG TARGETPLATFORM
 
-RUN apk add --no-cache musl-dev pkgconf openssl-dev openssl-libs-static
+# build-base + make: tikv-jemalloc-sys compiles jemalloc from source.
+RUN apk add --no-cache build-base make musl-dev pkgconf openssl-dev openssl-libs-static
 
 WORKDIR /app
 COPY Cargo.toml Cargo.lock* ./
 COPY src ./src
 
 ENV OPENSSL_STATIC=1
-# target-cpu=x86-64-v3 unlocks AVX2/BMI2 on Haswell+ / Zen+ hosts. Applied only
-# to linux/amd64; arm64 builds use their default target-cpu.
-#
-# BuildKit cache mounts persist the cargo registry and target dir between
-# builds. First build pays the full cost; rebuilds reuse compiled deps. The
-# final binary is copied out before the cache mount is torn down at RUN-end.
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/app/target,sharing=locked \
     case "$TARGETPLATFORM" in \

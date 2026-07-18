@@ -247,9 +247,18 @@ mod tests {
 
     #[test]
     fn normalize_url_adds_scheme_and_strips_trailing_slash() {
-        assert_eq!(normalize_url("ct.example.com/log/"), "https://ct.example.com/log");
-        assert_eq!(normalize_url("https://ct.example.com/log"), "https://ct.example.com/log");
-        assert_eq!(normalize_url("  http://ct.example.com/log/  "), "http://ct.example.com/log");
+        assert_eq!(
+            normalize_url("ct.example.com/log/"),
+            "https://ct.example.com/log"
+        );
+        assert_eq!(
+            normalize_url("https://ct.example.com/log"),
+            "https://ct.example.com/log"
+        );
+        assert_eq!(
+            normalize_url("  http://ct.example.com/log/  "),
+            "http://ct.example.com/log"
+        );
     }
 
     #[test]
@@ -266,9 +275,18 @@ mod tests {
 
     #[test]
     fn parse_catalog_state_known_and_unknown() {
-        assert_eq!(parse_catalog_state("usable"), KnownOrUnknown::Known(CatalogState::Usable));
-        assert_eq!(parse_catalog_state("QUALIFIED"), KnownOrUnknown::Known(CatalogState::Qualified));
-        assert_eq!(parse_catalog_state(" Readonly "), KnownOrUnknown::Known(CatalogState::Readonly));
+        assert_eq!(
+            parse_catalog_state("usable"),
+            KnownOrUnknown::Known(CatalogState::Usable)
+        );
+        assert_eq!(
+            parse_catalog_state("QUALIFIED"),
+            KnownOrUnknown::Known(CatalogState::Qualified)
+        );
+        assert_eq!(
+            parse_catalog_state(" Readonly "),
+            KnownOrUnknown::Known(CatalogState::Readonly)
+        );
         assert_eq!(
             parse_catalog_state("deprecated"),
             KnownOrUnknown::Unknown("deprecated".to_string())

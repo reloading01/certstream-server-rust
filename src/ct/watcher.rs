@@ -1,13 +1,13 @@
 use std::borrow::Cow;
-use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::{Duration, Instant};
 
 use tracing::{debug, error, info};
 
 use super::{
-    broadcast_cert, build_cached_cert, parse_leaf_input_with_options, CtLog, ParseOptions,
-    WatcherContext,
+    CtLog, ParseOptions, WatcherContext, broadcast_cert, build_cached_cert,
+    parse_leaf_input_with_options,
 };
 use crate::models::{CertificateData, CertificateMessage, Source};
 
@@ -194,7 +194,7 @@ impl LogHealth {
     /// with `inner.circuit` under the lock.
     pub fn should_attempt(&self) -> bool {
         match self.circuit_fast.load(Ordering::Acquire) {
-            CIRCUIT_CLOSED | CIRCUIT_HALF_OPEN => true,  // ← ~1ns, no lock
+            CIRCUIT_CLOSED | CIRCUIT_HALF_OPEN => true, // ← ~1ns, no lock
             _ => {
                 // Circuit is Open — check if reset timeout has elapsed.
                 let mut s = self.inner.lock();
@@ -206,7 +206,8 @@ impl LogHealth {
                     && opened_at.elapsed() > Duration::from_millis(Self::CIRCUIT_RESET_MS)
                 {
                     s.circuit = CircuitState::HalfOpen;
-                    self.circuit_fast.store(CIRCUIT_HALF_OPEN, Ordering::Release);
+                    self.circuit_fast
+                        .store(CIRCUIT_HALF_OPEN, Ordering::Release);
                     return true;
                 }
                 false
@@ -220,7 +221,8 @@ impl LogHealth {
     pub fn set_half_open_for_test(&self) {
         let mut s = self.inner.lock();
         s.circuit = CircuitState::HalfOpen;
-        self.circuit_fast.store(CIRCUIT_HALF_OPEN, Ordering::Release);
+        self.circuit_fast
+            .store(CIRCUIT_HALF_OPEN, Ordering::Release);
     }
 }
 
@@ -239,7 +241,7 @@ pub async fn run_watcher_with_cache(log: CtLog, ctx: WatcherContext) {
         dedup,
         rate_limiter,
         streams,
-        issuer_cache: _,  // RFC6962 watcher doesn't use the issuer cache (no /issuer/ endpoint).
+        issuer_cache: _, // RFC6962 watcher doesn't use the issuer cache (no /issuer/ endpoint).
     } = ctx;
     use backon::{ExponentialBuilder, Retryable};
     use serde::Deserialize;
@@ -283,6 +285,11 @@ pub async fn run_watcher_with_cache(log: CtLog, ctx: WatcherContext) {
     let health = Arc::new(LogHealth::new());
     let poll_interval = Duration::from_millis(config.poll_interval_ms);
     let timeout = Duration::from_secs(config.request_timeout_secs);
+    let fetch_concurrency = config.fetch_concurrency.max(1) as usize;
+    // Entries requested per get-entries call. Starts at the configured batch
+    // size; shrinks to the server's observed page size when it clamps (so the
+    // pipelined windows stay aligned) and probes back up on full responses.
+    let mut effective_batch: u64 = config.batch_size.max(1);
 
     // Per-watcher reusable JSON parse buffer. Pre-1.5.0 every get-entries
     // response did `let mut v = b.to_vec();` — a fresh ~1.5 MB allocation
@@ -292,6 +299,13 @@ pub async fn run_watcher_with_cache(log: CtLog, ctx: WatcherContext) {
     // amortised cost.
     #[cfg(feature = "simd")]
     let mut json_buf: Vec<u8> = Vec::new();
+    // Cap on the capacity `json_buf` may keep between polls. Catch-up bursts
+    // (256 entries × ~5-10 KB) still reuse the buffer within the drain loop;
+    // anything larger is released afterwards instead of staying resident for
+    // the life of the watcher (~35 watchers × up to ~3 MB was the single
+    // biggest steady-state RSS contributor in the 1.5.3 memory audit).
+    #[cfg(feature = "simd")]
+    const JSON_BUF_RETAIN_MAX: usize = 512 * 1024;
 
     // Issue #3: Pre-register metric counter handles — eliminates one String allocation
     // per certificate in the hot loop. The handle captures the label at startup time.
@@ -310,12 +324,19 @@ pub async fn run_watcher_with_cache(log: CtLog, ctx: WatcherContext) {
     // `lite` streams; `domains_only` doesn't include them. When neither is
     // subscribed at the config level, skip the per-cert extension-string
     // work entirely (still populate all_domains for the DNS list).
+    // `as_der` (base64 of the whole DER) is likewise only emitted by the
+    // `full` stream — neither `lite`, `domains_only`, nor the REST cert
+    // endpoint serve it.
     let parse_opts = ParseOptions {
-        include_der: true,
+        include_der: streams.full,
         parse_extensions: streams.full || streams.lite,
     };
 
     info!(log = %log_name, url = %base_url, "starting watcher");
+
+    // Hoisted: the STH endpoint never changes; no need to re-format! it on
+    // every poll / health check.
+    let sth_url = format!("{}/ct/v1/get-sth", base_url);
 
     // P1 fix: RFC6962 tree_size rollback guard, parallel to static_ct.rs's
     // (which #5 introduced). RFC6962 STH tree_size is monotonically
@@ -334,10 +355,14 @@ pub async fn run_watcher_with_cache(log: CtLog, ctx: WatcherContext) {
             .with_max_delay(Duration::from_millis(config.retry_max_delay_ms))
             .with_max_times(config.retry_max_attempts as usize);
 
-        let url = format!("{}/ct/v1/get-sth", base_url);
         match (|| async {
-            let response: SthResponse =
-                client.get(&url).timeout(timeout).send().await?.json().await?;
+            let response: SthResponse = client
+                .get(&sth_url)
+                .timeout(timeout)
+                .send()
+                .await?
+                .json()
+                .await?;
             Ok::<_, reqwest::Error>(response.tree_size)
         })
         .retry(backoff)
@@ -381,8 +406,7 @@ pub async fn run_watcher_with_cache(log: CtLog, ctx: WatcherContext) {
             // or 429 response marked the log healthy and immediately entered
             // the get-entries loop — which failed again, oscillating between
             // healthy and unhealthy without ever backing off properly.
-            let url = format!("{}/ct/v1/get-sth", base_url);
-            match client.get(&url).timeout(timeout).send().await {
+            match client.get(&sth_url).timeout(timeout).send().await {
                 Ok(resp) if resp.status().is_success() => {
                     health.record_success(config.healthy_threshold);
                     info!(log = %log.description, "health check passed, resuming");
@@ -406,7 +430,6 @@ pub async fn run_watcher_with_cache(log: CtLog, ctx: WatcherContext) {
             }
         }
 
-        let sth_url = format!("{}/ct/v1/get-sth", base_url);
         let tree_size = match client.get(&sth_url).timeout(timeout).send().await {
             Ok(resp) => {
                 if !resp.status().is_success() {
@@ -414,7 +437,8 @@ pub async fn run_watcher_with_cache(log: CtLog, ctx: WatcherContext) {
                     if status.as_u16() == 429 {
                         let retry_after_ms =
                             super::normalize::parse_retry_after(resp.headers(), &log.description);
-                        health.record_rate_limit_with_ms(config.unhealthy_threshold, retry_after_ms);
+                        health
+                            .record_rate_limit_with_ms(config.unhealthy_threshold, retry_after_ms);
                         metrics::counter!(
                             "certstream_ct_log_rate_limited_total",
                             "log" => log_name.clone(),
@@ -472,76 +496,141 @@ pub async fn run_watcher_with_cache(log: CtLog, ctx: WatcherContext) {
         high_water_tree_size = tree_size;
 
         if current_index >= tree_size {
+            // Caught up — idle point. If the last catch-up left a burst-sized
+            // parse buffer behind, hand it back to the allocator now: within
+            // the drain loop the capacity is reused batch-to-batch, but there
+            // is no reason to keep multi-MB capacity resident while idle
+            // (memory audit: ~35 watchers × up to ~3 MB retained forever was
+            // the single biggest steady-state RSS contributor).
+            #[cfg(feature = "simd")]
+            if json_buf.capacity() > JSON_BUF_RETAIN_MAX {
+                json_buf = Vec::new();
+            }
             sleep(poll_interval).await;
             continue;
         }
 
-        // Defensive: tree_size > current_index ≥ 0 here, so tree_size ≥ 1 and
-        // `tree_size - 1` never underflows. Use saturating_sub anyway so any
-        // future regression saturates at 0 instead of wrapping to u64::MAX.
-        let end_inclusive = tree_size.saturating_sub(1);
-        let end = (current_index + config.batch_size).min(end_inclusive);
-        let entries_url = format!(
-            "{}/ct/v1/get-entries?start={}&end={}",
-            base_url, current_index, end
-        );
+        // Drain every batch available under this STH before re-polling
+        // get-sth — mirrors the static-CT tile loop. Fetches are pipelined
+        // `fetch_concurrency`-deep (each still pays a token to the
+        // per-operator bucket, so the sustained request rate is unchanged);
+        // responses are processed strictly in order.
+        'drain: while current_index < tree_size && !shutdown.is_cancelled() {
+            use futures::StreamExt as _;
 
-        // Respect per-operator rate limit before making request
-        if let Some(ref limiter) = rate_limiter {
-            limiter.tick().await;
-        }
+            // Defensive: tree_size > current_index ≥ 0 here, so tree_size ≥ 1 and
+            // `tree_size - 1` never underflows. Use saturating_sub anyway so any
+            // future regression saturates at 0 instead of wrapping to u64::MAX.
+            let end_inclusive = tree_size.saturating_sub(1);
+            let window = effective_batch.max(1);
+            let drain_start = current_index;
 
-        match client.get(&entries_url).timeout(timeout).send().await {
-            Ok(resp) => {
-                if !resp.status().is_success() {
-                    let status = resp.status();
-                    if status.as_u16() == 429 {
-                        let retry_after_ms =
-                            super::normalize::parse_retry_after(resp.headers(), &log.description);
-                        health.record_rate_limit_with_ms(config.unhealthy_threshold, retry_after_ms);
-                        metrics::counter!(
-                            "certstream_ct_log_rate_limited_total",
-                            "log" => log_name.clone(),
-                            "source_id" => source_id.clone(),
-                            "log_type" => "rfc6962"
-                        )
-                        .increment(1);
-                        debug!(log = %log.description, retry_after_ms, "rate limited by CT log, backing off");
-                    } else if status.as_u16() == 400 {
-                        // Entries not yet available — skip ahead to tree_size
-                        debug!(log = %log.description, start = current_index, end = end,
-                            "entries not available (400), skipping to tree head");
-                        current_index = tree_size;
-                        sleep(poll_interval).await;
-                        continue;
-                    } else {
-                        health.record_failure(config.unhealthy_threshold);
-                        debug!(log = %log.description, status = %status, "CT log returned error");
+            // Window starts are precomputed assuming full responses. If the
+            // server returns fewer entries than requested (spec-legal — many
+            // logs clamp), the remaining prefetched windows are misaligned;
+            // the processing loop detects that, shrinks `effective_batch` to
+            // what the server actually serves, and rebuilds the pipeline from
+            // the true index.
+            let mut in_flight = futures::stream::iter(
+                (0u64..)
+                    .map(move |i| drain_start + i * window)
+                    .take_while(move |s| *s <= end_inclusive)
+                    .map(move |s| (s, (s + window - 1).min(end_inclusive))),
+            )
+            .map(|(start, end)| {
+                let client = client.clone();
+                let limiter = rate_limiter.clone();
+                let desc = log.description.clone();
+                let url = format!("{}/ct/v1/get-entries?start={}&end={}", base_url, start, end);
+                async move {
+                    // Respect per-operator rate limit before making request
+                    if let Some(ref l) = limiter {
+                        l.tick().await;
                     }
-                    sleep(health.get_backoff()).await;
-                    continue;
+                    let outcome = match client.get(&url).timeout(timeout).send().await {
+                        Ok(resp) => {
+                            let status = resp.status();
+                            if status.is_success() {
+                                match resp.bytes().await {
+                                    Ok(b) => super::FetchOutcome::Body(b),
+                                    Err(e) => super::FetchOutcome::Net(e.to_string()),
+                                }
+                            } else {
+                                let retry_after_ms = (status.as_u16() == 429).then(|| {
+                                    super::normalize::parse_retry_after(resp.headers(), &desc)
+                                });
+                                super::FetchOutcome::Http(status, retry_after_ms)
+                            }
+                        }
+                        Err(e) => super::FetchOutcome::Net(e.to_string()),
+                    };
+                    (start, end, outcome)
                 }
+            })
+            .buffered(fetch_concurrency);
+
+            while let Some((batch_start, end, outcome)) = in_flight.next().await {
+                if shutdown.is_cancelled() {
+                    break 'drain;
+                }
+                // Windows are aligned as long as every prior response was
+                // full; partial responses break out below before this runs.
+                debug_assert_eq!(batch_start, current_index);
+
+                let body = match outcome {
+                    super::FetchOutcome::Body(b) => b,
+                    super::FetchOutcome::Http(status, retry_after) => {
+                        if let Some(retry_after_ms) = retry_after {
+                            health.record_rate_limit_with_ms(
+                                config.unhealthy_threshold,
+                                retry_after_ms,
+                            );
+                            metrics::counter!(
+                                "certstream_ct_log_rate_limited_total",
+                                "log" => log_name.clone(),
+                                "source_id" => source_id.clone(),
+                                "log_type" => "rfc6962"
+                            )
+                            .increment(1);
+                            debug!(log = %log.description, retry_after_ms, "rate limited by CT log, backing off");
+                        } else if status.as_u16() == 400 {
+                            // Entries not yet available — skip ahead to tree_size
+                            debug!(log = %log.description, start = batch_start, end = end,
+                                "entries not available (400), skipping to tree head");
+                            current_index = tree_size;
+                            sleep(poll_interval).await;
+                            break 'drain;
+                        } else {
+                            health.record_failure(config.unhealthy_threshold);
+                            debug!(log = %log.description, status = %status, "CT log returned error");
+                        }
+                        sleep(health.get_backoff()).await;
+                        break 'drain;
+                    }
+                    super::FetchOutcome::Net(e) => {
+                        health.record_failure(config.unhealthy_threshold);
+                        debug!(log = %log.description, error = %e, "failed to fetch entries");
+                        sleep(health.get_backoff()).await;
+                        break 'drain;
+                    }
+                };
 
                 // Issue #14: simd-json for 2-4× faster deserialization of the entries
                 // response — the largest JSON payload in the hot path. simd_json::from_slice
                 // requires &mut [u8] (it scribbles over the buffer for string escaping),
-                // so we copy into the per-watcher reusable Vec. The reusable buffer is
-                // the 1.5.0 fix for "16 MB transient" in the heap profile — capacity is
-                // amortised across polls instead of `to_vec()`-ing a fresh allocation
-                // every request.
+                // so we copy into the per-watcher reusable Vec (processing is
+                // sequential even though fetching is pipelined, so one buffer
+                // still suffices).
                 #[cfg(feature = "simd")]
-                let parse_result: Result<EntriesResponse, String> = match resp.bytes().await {
-                    Ok(b) => {
-                        json_buf.clear();
-                        json_buf.extend_from_slice(&b);
-                        simd_json::from_slice::<EntriesResponse>(&mut json_buf)
-                            .map_err(|e| e.to_string())
-                    }
-                    Err(e) => Err(e.to_string()),
+                let parse_result: Result<EntriesResponse, String> = {
+                    json_buf.clear();
+                    json_buf.extend_from_slice(&body);
+                    simd_json::from_slice::<EntriesResponse>(&mut json_buf)
+                        .map_err(|e| e.to_string())
                 };
                 #[cfg(not(feature = "simd"))]
                 let parse_result: Result<EntriesResponse, String> =
-                    resp.json::<EntriesResponse>().await.map_err(|e| e.to_string());
+                    serde_json::from_slice::<EntriesResponse>(&body).map_err(|e| e.to_string());
 
                 match parse_result {
                     Ok(entries_resp) => {
@@ -563,85 +652,152 @@ pub async fn run_watcher_with_cache(log: CtLog, ctx: WatcherContext) {
                             .increment(1);
                             debug!(log = %log_name, "CT log returned empty entries response, retrying");
                             sleep(poll_interval).await;
-                            continue;
+                            break 'drain;
                         }
 
-                        let mut max_index_seen = current_index;
-
-                        for (i, entry) in entries_resp.entries.into_iter().enumerate() {
-                            let cert_index = current_index + i as u64;
-                            max_index_seen = max_index_seen.max(cert_index);
-                            let parsed =
-                                match parse_leaf_input_with_options(&entry.leaf_input, &entry.extra_data, parse_opts) {
+                        // Base64 decode + X.509 parse + hashing for a whole
+                        // batch is pure CPU with no yield points. Run it on the
+                        // blocking pool so simultaneous catch-up across many
+                        // watchers can't starve the small async runtime; one
+                        // spawn_blocking hop amortised over up to `batch_size`
+                        // certs.
+                        let entries = entries_resp.entries;
+                        let job_dedup = Arc::clone(&dedup);
+                        let job_tx = tx.clone();
+                        let job_cache = Arc::clone(&cache);
+                        let job_stats = Arc::clone(&stats);
+                        let job_streams = Arc::clone(&streams);
+                        let job_source = Arc::clone(&source);
+                        let job_counter_messages = counter_messages.clone();
+                        let job_counter_parse_failures = counter_parse_failures.clone();
+                        let job_log_name = log_name.clone();
+                        let job_base_url = base_url.clone();
+                        let job_state_manager = Arc::clone(&state_manager);
+                        let job_tracker = Arc::clone(&tracker);
+                        let job_health = Arc::clone(&health);
+                        let full_stream_enabled = streams.full;
+                        let join = tokio::task::spawn_blocking(move || {
+                            let mut max_index_seen = batch_start;
+                            for (i, entry) in entries.into_iter().enumerate() {
+                                let cert_index = batch_start + i as u64;
+                                max_index_seen = max_index_seen.max(cert_index);
+                                let parsed = match parse_leaf_input_with_options(
+                                    &entry.leaf_input,
+                                    &entry.extra_data,
+                                    parse_opts,
+                                ) {
                                     Some(p) => p,
                                     None => {
-                                        debug!(log = %log_name, index = cert_index, "skipped unparseable cert");
-                                        counter_parse_failures.increment(1);
+                                        debug!(log = %job_log_name, index = cert_index, "skipped unparseable cert");
+                                        job_counter_parse_failures.increment(1);
                                         continue;
                                     }
                                 };
 
-                            if !dedup.is_new(&parsed.leaf_cert.sha256_raw) {
-                                continue;
+                                if !job_dedup.is_new(&parsed.leaf_cert.sha256_raw) {
+                                    continue;
+                                }
+
+                                // Deferred chain parsing: only for entries that
+                                // passed dedup, and only when the `full` stream —
+                                // the sole consumer of `chain` — is enabled.
+                                let chain = full_stream_enabled.then(|| parsed.parse_chain());
+
+                                let seen = chrono::Utc::now().timestamp_millis() as f64 / 1000.0;
+                                // Issue #2: wrap in Arc once; share between CachedCert and CertificateData.
+                                let leaf = Arc::new(parsed.leaf_cert);
+                                let cached = build_cached_cert(
+                                    Arc::clone(&leaf),
+                                    seen,
+                                    Arc::clone(&job_source),
+                                    cert_index,
+                                );
+                                let cert_link = format!(
+                                    "{}/ct/v1/get-entries?start={}&end={}",
+                                    job_base_url, cert_index, cert_index
+                                );
+                                let msg = CertificateMessage {
+                                    message_type: Cow::Borrowed("certificate_update"),
+                                    data: CertificateData {
+                                        update_type: parsed.update_type,
+                                        leaf_cert: leaf,
+                                        chain,
+                                        cert_index,
+                                        cert_link,
+                                        seen,
+                                        submission_timestamp: parsed.submission_timestamp,
+                                        source: Arc::clone(&job_source),
+                                    },
+                                };
+                                broadcast_cert(
+                                    msg,
+                                    &job_tx,
+                                    &job_cache,
+                                    cached,
+                                    &job_stats,
+                                    &job_counter_messages,
+                                    &job_streams,
+                                );
                             }
 
-                            // Deferred chain parsing: only parse chain certs
-                            // for entries that passed the dedup filter.
-                            let chain = parsed.parse_chain();
-
-                            let seen = chrono::Utc::now().timestamp_millis() as f64 / 1000.0;
-                            // Issue #2: wrap in Arc once; share between CachedCert and CertificateData.
-                            let leaf = Arc::new(parsed.leaf_cert);
-                            let cached = build_cached_cert(
-                                Arc::clone(&leaf),
-                                seen,
-                                &log.description,
-                                &base_url,
-                                cert_index,
+                            // Checkpoint INSIDE the job: if the supervisor's
+                            // select! drops the watcher future at the
+                            // `join.await` below (shutdown), the detached
+                            // blocking task still runs to completion — the
+                            // broadcasts above and this index persist stay
+                            // atomic, so a restart doesn't replay the batch.
+                            let next_index = max_index_seen + 1;
+                            job_state_manager.update_index(&job_base_url, next_index, tree_size);
+                            job_tracker.update(
+                                &job_base_url,
+                                job_health.status(),
+                                next_index,
+                                tree_size,
+                                job_health.total_errors(),
                             );
-                            let cert_link = format!(
-                                "{}/ct/v1/get-entries?start={}&end={}",
-                                base_url, cert_index, cert_index
-                            );
-                            let msg = CertificateMessage {
-                                message_type: Cow::Borrowed("certificate_update"),
-                                data: CertificateData {
-                                    update_type: parsed.update_type,
-                                    leaf_cert: leaf,
-                                    chain: Some(chain),
-                                    cert_index,
-                                    cert_link,
-                                    seen,
-                                    submission_timestamp: parsed.submission_timestamp,
-                                    source: Arc::clone(&source),
-                                },
-                            };
-                            broadcast_cert(msg, &tx, &cache, cached, &stats, &counter_messages, &streams);
-                        }
+                            max_index_seen
+                        });
+                        let max_index_seen = match join.await {
+                            Ok(v) => v,
+                            // Re-raise worker panics so the supervisor's
+                            // catch_unwind recovery path in main.rs still fires.
+                            Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
+                            // Cancelled (runtime shutdown) — bail out quietly.
+                            Err(_) => break 'drain,
+                        };
 
                         debug!(log = %log_name, count = count, "fetched entries");
                         current_index = max_index_seen + 1;
-                        state_manager.update_index(&base_url, current_index, tree_size);
 
-                        tracker.update(
-                            &base_url,
-                            health.status(),
-                            current_index,
-                            tree_size,
-                            health.total_errors(),
-                        );
+                        let requested = end - batch_start + 1;
+                        if (count as u64) < requested {
+                            if current_index < tree_size {
+                                // Server clamps below our window — adopt its
+                                // page size and rebuild the pipeline from the
+                                // true index (the prefetched windows ahead of
+                                // us assumed full responses and are stale).
+                                effective_batch = (count as u64).max(1);
+                                debug!(
+                                    log = %log_name,
+                                    served = count,
+                                    requested,
+                                    "short get-entries response; realigning fetch window"
+                                );
+                            }
+                            break;
+                        } else if effective_batch < config.batch_size {
+                            // Server kept up with the current window — probe
+                            // a larger page again on the next pipeline build.
+                            effective_batch = (effective_batch * 2).min(config.batch_size);
+                        }
                     }
                     Err(ref e) => {
                         health.record_failure(config.unhealthy_threshold);
                         debug!(log = %log.description, error = %e, "failed to parse entries");
                         sleep(health.get_backoff()).await;
+                        break 'drain;
                     }
                 }
-            }
-            Err(e) => {
-                health.record_failure(config.unhealthy_threshold);
-                debug!(log = %log.description, error = %e, "failed to fetch entries");
-                sleep(health.get_backoff()).await;
             }
         }
     }

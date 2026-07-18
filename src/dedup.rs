@@ -26,8 +26,12 @@ const DEFAULT_CLEANUP_INTERVAL_SECS: u64 = 15;
 
 /// Issue #1: Use raw [u8; 32] SHA-256 bytes as the key — fixed-size, stack-allocated,
 /// trivially hashable. Eliminates one heap allocation per certificate on every lookup.
+///
+/// The key is already a uniformly-distributed SHA-256 digest, so the map's
+/// hasher only needs to fold it into a u64 — ahash does that in a few cycles,
+/// vs SipHash's full keyed permutation on every lookup.
 pub struct DedupFilter {
-    seen: DashMap<[u8; 32], Instant>,
+    seen: DashMap<[u8; 32], Instant, ahash::RandomState>,
     /// Configured upper bound for the cache (advisory; the actual bound is
     /// the TTL-driven `cleanup_task` that runs every 60s). Kept on the
     /// struct so future code paths can re-introduce a high-water guard
@@ -44,7 +48,10 @@ impl DedupFilter {
 
     pub fn with_config(capacity: usize, ttl: Duration) -> Self {
         Self {
-            seen: DashMap::with_capacity(capacity.max(4) / 4),
+            seen: DashMap::with_capacity_and_hasher(
+                capacity.max(4) / 4,
+                ahash::RandomState::default(),
+            ),
             capacity: capacity.max(1),
             ttl,
         }
@@ -166,7 +173,7 @@ mod tests {
     #[test]
     fn test_is_new_ttl_expiry() {
         let filter = DedupFilter {
-            seen: DashMap::with_capacity(100),
+            seen: DashMap::with_capacity_and_hasher(100, ahash::RandomState::default()),
             capacity: DEFAULT_CAPACITY,
             ttl: Duration::from_millis(50),
         };
@@ -187,7 +194,7 @@ mod tests {
         // `clear()` and silently re-broadcast every in-flight cert. The new
         // path only evicts genuinely expired entries, so fresh keys survive.
         let filter = DedupFilter {
-            seen: DashMap::with_capacity(4),
+            seen: DashMap::with_capacity_and_hasher(4, ahash::RandomState::default()),
             capacity: 5,
             ttl: Duration::from_secs(300),
         };
@@ -242,7 +249,7 @@ mod tests {
     #[test]
     fn test_cleanup_removes_expired() {
         let filter = DedupFilter {
-            seen: DashMap::with_capacity(100),
+            seen: DashMap::with_capacity_and_hasher(100, ahash::RandomState::default()),
             capacity: DEFAULT_CAPACITY,
             ttl: Duration::from_millis(50),
         };

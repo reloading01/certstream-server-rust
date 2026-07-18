@@ -9,52 +9,91 @@ pub use log_list::*;
 pub use normalize::normalize_operator;
 pub use parser::*;
 
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
 /// Per-operator rate limiter to avoid hitting CT log rate limits.
 ///
-/// Semantics: at most one call may complete `tick()` per `min_interval`.
-/// The mutex is held across the sleep so concurrent callers serialize and
-/// each one waits its full slice — equivalent to a single-permit token bucket
-/// refilled at `1 / min_interval` Hz. Simpler and more obviously correct than
-/// sharing a `tokio::time::Interval`, which has non-trivial missed-tick
-/// semantics under contention.
+/// Token bucket: refilled at `1 / min_interval` Hz, holding at most `burst`
+/// tokens. The long-run request rate is therefore identical to the old
+/// one-permit design (one request per `min_interval`), but up to `burst`
+/// requests may start back-to-back — which is what lets a watcher pipeline
+/// `fetch_concurrency` get-entries/tile fetches without violating operator
+/// politeness over any window longer than the burst itself.
 pub type OperatorRateLimiter = Arc<OperatorLimiter>;
 
 pub struct OperatorLimiter {
-    last_tick: tokio::sync::Mutex<tokio::time::Instant>,
+    state: tokio::sync::Mutex<BucketState>,
     min_interval: std::time::Duration,
+    burst: f64,
+}
+
+struct BucketState {
+    tokens: f64,
+    last_refill: tokio::time::Instant,
 }
 
 impl OperatorLimiter {
-    pub fn new(min_interval: std::time::Duration) -> Self {
-        // Initialise last_tick in the past so the first caller doesn't wait.
-        let now = tokio::time::Instant::now();
-        let seed = now.checked_sub(min_interval).unwrap_or(now);
+    pub fn with_burst(min_interval: std::time::Duration, burst: u32) -> Self {
         Self {
-            last_tick: tokio::sync::Mutex::new(seed),
+            // Seed with a full bucket so startup doesn't serialize the first
+            // burst of requests (parity with the old "first tick is free").
+            state: tokio::sync::Mutex::new(BucketState {
+                tokens: burst.max(1) as f64,
+                last_refill: tokio::time::Instant::now(),
+            }),
             min_interval,
+            burst: burst.max(1) as f64,
         }
     }
 
     pub async fn tick(&self) {
-        let mut last = self.last_tick.lock().await;
-        let now = tokio::time::Instant::now();
-        let elapsed = now.duration_since(*last);
-        if elapsed < self.min_interval {
-            tokio::time::sleep(self.min_interval - elapsed).await;
+        if self.min_interval.is_zero() {
+            return;
         }
-        *last = tokio::time::Instant::now();
+        loop {
+            let wait = {
+                let mut s = self.state.lock().await;
+                let now = tokio::time::Instant::now();
+                let refill = now.duration_since(s.last_refill).as_secs_f64()
+                    / self.min_interval.as_secs_f64();
+                s.tokens = (s.tokens + refill).min(self.burst);
+                s.last_refill = now;
+                if s.tokens >= 1.0 {
+                    // Deduct and return without awaiting — a caller cancelled
+                    // mid-`tick` can never leak a token.
+                    s.tokens -= 1.0;
+                    return;
+                }
+                self.min_interval.mul_f64(1.0 - s.tokens)
+            };
+            // Sleep outside the lock so other operators'/watchers' callers
+            // aren't serialized behind our wait, then re-check.
+            tokio::time::sleep(wait).await;
+        }
     }
+}
+
+/// Outcome of one pipelined get-entries/tile fetch. The body is downloaded
+/// inside the concurrent stage so network transfer overlaps across the
+/// `buffered(fetch_concurrency)` window; the sequential processing stage only
+/// sees finished results.
+pub(crate) enum FetchOutcome {
+    /// 2xx with the full body.
+    Body(bytes::Bytes),
+    /// Non-success HTTP status; for 429 the second field carries the
+    /// canonicalized Retry-After backoff in ms.
+    Http(reqwest::StatusCode, Option<u64>),
+    /// Transport/body error, stringified.
+    Net(String),
 }
 
 use crate::api::{CachedCert, CertificateCache, LogTracker, ServerStats};
 use crate::config::{CtLogConfig, StreamConfig};
 use crate::dedup::DedupFilter;
-use crate::models::{CertificateMessage, LeafCert, PreSerializedMessage};
+use crate::models::{CertificateMessage, LeafCert, PreSerializedMessage, Source};
 use crate::state::StateManager;
 use static_ct::IssuerCache;
 
@@ -80,19 +119,18 @@ pub struct WatcherContext {
     pub issuer_cache: Arc<IssuerCache>,
 }
 
-/// Issue #2: Build a CachedCert sharing the Arc<LeafCert> — zero field clones.
+/// Issue #2: Build a CachedCert sharing the Arc<LeafCert> and Arc<Source> —
+/// zero field clones, zero per-cert String allocations.
 pub fn build_cached_cert(
     leaf: Arc<LeafCert>,
     seen: f64,
-    source_name: &str,
-    source_url: &str,
+    source: Arc<Source>,
     cert_index: u64,
 ) -> CachedCert {
     CachedCert {
         leaf,
         seen,
-        source_name: source_name.to_string(),
-        source_url: source_url.to_string(),
+        source,
         cert_index,
     }
 }
@@ -126,9 +164,7 @@ pub fn broadcast_cert(
             serialized.full.len() + serialized.lite.len() + serialized.domains_only.len();
         let _ = tx.send(serialized);
         stats.messages_sent.fetch_add(1, Ordering::Relaxed);
-        stats
-            .certificates_processed
-            .fetch_add(1, Ordering::Relaxed);
+        stats.certificates_processed.fetch_add(1, Ordering::Relaxed);
         stats
             .bytes_sent
             .fetch_add(msg_size as u64, Ordering::Relaxed);
@@ -183,7 +219,11 @@ mod broadcast_tests {
     }
 
     fn dummy_cached() -> CachedCert {
-        build_cached_cert(make_leaf(), 0.0, "t", "u", 0)
+        let source = Arc::new(Source {
+            name: Arc::from("t"),
+            url: Arc::from("u"),
+        });
+        build_cached_cert(make_leaf(), 0.0, source, 0)
     }
 
     /// Regression for #13: with **no** subscribers, broadcast_cert must skip
@@ -265,11 +305,39 @@ mod broadcast_tests {
         let _wall_time = Instant::now();
     }
 
+    /// Burst semantics: a bucket of N allows N immediate ticks, then the
+    /// (N+1)th must wait ~min_interval. Long-run rate is unchanged.
+    #[tokio::test]
+    async fn operator_limiter_burst_allows_n_then_throttles() {
+        let limiter = OperatorLimiter::with_burst(std::time::Duration::from_millis(100), 3);
+
+        let t0 = Instant::now();
+        for _ in 0..3 {
+            limiter.tick().await;
+        }
+        assert!(
+            t0.elapsed() < std::time::Duration::from_millis(50),
+            "first `burst` ticks must not wait, got {:?}",
+            t0.elapsed()
+        );
+
+        let t1 = Instant::now();
+        limiter.tick().await;
+        assert!(
+            t1.elapsed() >= std::time::Duration::from_millis(80),
+            "tick beyond the burst must wait ~min_interval, got {:?}",
+            t1.elapsed()
+        );
+    }
+
     /// Direct OperatorLimiter timing test for #7. Two back-to-back ticks must
     /// take at least `min_interval` wall time when the limiter is contended.
     #[tokio::test]
     async fn operator_limiter_enforces_min_interval() {
-        let limiter = Arc::new(OperatorLimiter::new(std::time::Duration::from_millis(100)));
+        let limiter = Arc::new(OperatorLimiter::with_burst(
+            std::time::Duration::from_millis(100),
+            1,
+        ));
         // First tick consumes the seeded "in the past" credit, returns immediately.
         let t0 = Instant::now();
         limiter.tick().await;

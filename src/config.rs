@@ -62,6 +62,11 @@ pub struct StaticCtLog {
     /// Optional expected base64-encoded CT log ID for override validation.
     #[serde(default)]
     pub expected_log_id: Option<String>,
+    /// Optional base64-encoded SubjectPublicKeyInfo (DER) of the log's public
+    /// key, used to verify checkpoint signatures. When absent, checkpoints from
+    /// this log cannot be cryptographically verified (treated as unverifiable).
+    #[serde(default)]
+    pub key: Option<String>,
     /// Optional per-log overrides; absent entries inherit the global CT log
     /// batch size and poll interval.
     #[serde(default)]
@@ -101,6 +106,14 @@ impl Default for ProtocolConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct CtLogConfig {
+    /// Static-CT checkpoint signature verification policy. `warn` (default)
+    /// verifies the log signature and logs/counts failures but always accepts
+    /// the checkpoint; `enforce` additionally rejects checkpoints whose
+    /// signature is present but fails verification. Checkpoints that cannot be
+    /// verified at all (no usable P-256 key) are accepted in both modes.
+    /// Override with `CERTSTREAM_STATIC_CT_CHECKPOINT_SIGNATURE`.
+    #[serde(default)]
+    pub checkpoint_signature_mode: CheckpointSignatureMode,
     #[serde(default = "default_retry_max_attempts")]
     pub retry_max_attempts: u32,
     #[serde(default = "default_retry_initial_delay_ms")]
@@ -121,6 +134,13 @@ pub struct CtLogConfig {
     pub batch_size: u64,
     #[serde(default = "default_poll_interval_ms")]
     pub poll_interval_ms: u64,
+    /// Number of get-entries windows / tiles fetched concurrently per watcher
+    /// during catch-up. The per-operator token bucket allows a burst of this
+    /// size, so the long-run request rate still honours the operator rate
+    /// limit — concurrency only pipelines the latency. 1 = sequential
+    /// (pre-1.5.3 behaviour).
+    #[serde(default = "default_fetch_concurrency")]
+    pub fetch_concurrency: u32,
     /// Number of leaves a fresh static-CT watcher starts behind the current checkpoint head.
     /// The default preserves the existing head-256 behavior while making the overlap tunable.
     #[serde(default = "default_start_overlap_leaves")]
@@ -153,9 +173,36 @@ pub struct CtLogConfig {
     pub catalog_authority_overrides: std::collections::HashMap<String, bool>,
 }
 
+/// Verification policy for static-CT checkpoint signatures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CheckpointSignatureMode {
+    /// Verify the log signature and log/count failures, but always accept the
+    /// checkpoint (never blocks ingest). Default.
+    #[default]
+    Warn,
+    /// Reject checkpoints whose signature is present but fails verification.
+    /// Checkpoints that cannot be verified at all (no usable key) are still
+    /// accepted — inability to verify is not proof of forgery.
+    Enforce,
+}
+
+impl std::str::FromStr for CheckpointSignatureMode {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "warn" => Ok(Self::Warn),
+            "enforce" => Ok(Self::Enforce),
+            _ => Err(()),
+        }
+    }
+}
+
 impl Default for CtLogConfig {
     fn default() -> Self {
         Self {
+            checkpoint_signature_mode: CheckpointSignatureMode::default(),
             retry_max_attempts: default_retry_max_attempts(),
             retry_initial_delay_ms: default_retry_initial_delay_ms(),
             retry_max_delay_ms: default_retry_max_delay_ms(),
@@ -166,6 +213,7 @@ impl Default for CtLogConfig {
             state_file: default_state_file(),
             batch_size: default_batch_size(),
             poll_interval_ms: default_poll_interval_ms(),
+            fetch_concurrency: default_fetch_concurrency(),
             start_overlap_leaves: default_start_overlap_leaves(),
             rfc6962_enabled: true,
             static_ct_enabled: true,
@@ -204,10 +252,18 @@ fn default_health_check_interval_secs() -> u64 {
     60
 }
 fn default_batch_size() -> u64 {
-    256
+    // RFC 6962 servers clamp get-entries responses to their own maximum and
+    // returning fewer entries than requested is spec-legal, so asking for
+    // 1024 is safe everywhere; logs that allow it deliver 4× more entries
+    // per (rate-limited) request than the old 256 default. The watcher
+    // adapts its window to whatever the server actually returns.
+    1024
 }
 fn default_poll_interval_ms() -> u64 {
     1000
+}
+fn default_fetch_concurrency() -> u32 {
+    4
 }
 fn default_start_overlap_leaves() -> u64 {
     256
@@ -522,9 +578,14 @@ impl Config {
         env_override!(ct_log.state_file, "CERTSTREAM_CT_LOG_STATE_FILE", some_str);
         env_override!(ct_log.batch_size, "CERTSTREAM_CT_LOG_BATCH_SIZE");
         env_override!(ct_log.poll_interval_ms, "CERTSTREAM_CT_LOG_POLL_INTERVAL_MS");
+        env_override!(ct_log.fetch_concurrency, "CERTSTREAM_CT_LOG_FETCH_CONCURRENCY");
         env_override!(ct_log.start_overlap_leaves, "CERTSTREAM_CT_LOG_START_OVERLAP_LEAVES");
         env_override!(ct_log.rfc6962_enabled, "CERTSTREAM_RFC6962_ENABLED");
         env_override!(ct_log.static_ct_enabled, "CERTSTREAM_STATIC_CT_ENABLED");
+        env_override!(
+            ct_log.checkpoint_signature_mode,
+            "CERTSTREAM_STATIC_CT_CHECKPOINT_SIGNATURE"
+        );
 
         let mut connection_limit = yaml_config.connection_limit.unwrap_or_default();
         env_override!(connection_limit.enabled, "CERTSTREAM_CONNECTION_LIMIT_ENABLED");
@@ -639,6 +700,13 @@ impl Config {
             });
         }
 
+        if self.ct_log.fetch_concurrency == 0 || self.ct_log.fetch_concurrency > 16 {
+            errors.push(ConfigValidationError {
+                field: "ct_log.fetch_concurrency".to_string(),
+                message: "Fetch concurrency must be between 1 and 16".to_string(),
+            });
+        }
+
         if errors.is_empty() {
             Ok(())
         } else {
@@ -727,8 +795,9 @@ mod tests {
         assert_eq!(config.unhealthy_threshold, 5);
         assert_eq!(config.health_check_interval_secs, 60);
         assert_eq!(config.state_file, Some("certstream_state.json".to_string()));
-        assert_eq!(config.batch_size, 256);
+        assert_eq!(config.batch_size, 1024);
         assert_eq!(config.poll_interval_ms, 1000);
+        assert_eq!(config.fetch_concurrency, 4);
         assert_eq!(config.start_overlap_leaves, 256);
         assert!(config.rfc6962_enabled);
         assert!(config.static_ct_enabled);

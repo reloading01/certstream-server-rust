@@ -13,12 +13,8 @@ services:
     volumes:
       - ./config.soak.yaml:/etc/certstream/config.yaml:ro
       - ./soak-state:/var/lib/certstream
-    # Restart policy: never, so a panic surfaces visibly instead of being
-    # masked by docker's restart loop. The supervisor loop inside the binary
-    # already handles per-watcher panic recovery.
     restart: "no"
     healthcheck:
-      # /health (no auth) AND /metrics (no auth) — confirms both routers up.
       test: ["CMD-SHELL", "curl -sf http://localhost:8080/health && curl -sf http://localhost:8080/metrics > /dev/null"]
       interval: 30s
       timeout: 5s

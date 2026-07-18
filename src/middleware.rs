@@ -157,33 +157,49 @@ impl AuthMiddleware {
         }
     }
 
-    fn get_config(&self) -> AuthConfig {
-        self.hot_reload
-            .as_ref()
-            .map(|hr| hr.get().auth.clone())
-            .unwrap_or_else(|| self.fallback_config.clone())
+    /// Run `f` against the live config without cloning it. The hot-reload
+    /// snapshot is an `ArcSwap` load (refcount bump); pre-1.5.3 each check
+    /// cloned the whole `AuthConfig` — including the token `Vec<String>` —
+    /// up to three times per request.
+    fn with_config<R>(&self, f: impl FnOnce(&AuthConfig) -> R) -> R {
+        match &self.hot_reload {
+            Some(hr) => f(&hr.get().auth),
+            None => f(&self.fallback_config),
+        }
     }
 
-    pub fn validate(&self, token: Option<&str>) -> bool {
-        let config = self.get_config();
-
+    fn validate_against(config: &AuthConfig, token: Option<&str>) -> bool {
         if !config.enabled {
             return true;
         }
-
         let Some(t) = token else { return false };
         let token_value = t.strip_prefix("Bearer ").unwrap_or(t);
-        let token_bytes = token_value.as_bytes();
-
-        ct_contains(&config.tokens, token_bytes)
+        ct_contains(&config.tokens, token_value.as_bytes())
     }
 
+    /// Test-only inspectors — production traffic goes through `authorize`.
+    #[cfg(test)]
+    pub fn validate(&self, token: Option<&str>) -> bool {
+        self.with_config(|config| Self::validate_against(config, token))
+    }
+
+    #[cfg(test)]
     pub fn is_enabled(&self) -> bool {
-        self.get_config().enabled
+        self.with_config(|config| config.enabled)
     }
 
-    pub fn header_name(&self) -> String {
-        self.get_config().header_name
+    /// Full request check with a single config snapshot: enabled flag, header
+    /// lookup, and token validation all read the same consistent config.
+    pub fn authorize(&self, headers: &axum::http::HeaderMap) -> bool {
+        self.with_config(|config| {
+            if !config.enabled {
+                return true;
+            }
+            let token = headers
+                .get(config.header_name.as_str())
+                .and_then(|v| v.to_str().ok());
+            Self::validate_against(config, token)
+        })
     }
 }
 
@@ -192,17 +208,7 @@ pub async fn auth_middleware(
     request: Request<Body>,
     next: Next,
 ) -> Response {
-    if !auth.is_enabled() {
-        return next.run(request).await;
-    }
-
-    let header_name = auth.header_name();
-    let token = request
-        .headers()
-        .get(&header_name)
-        .and_then(|v| v.to_str().ok());
-
-    if auth.validate(token) {
+    if auth.authorize(request.headers()) {
         next.run(request).await
     } else {
         metrics::counter!("certstream_auth_rejected").increment(1);

@@ -34,8 +34,15 @@ ct_log:
   unhealthy_threshold: 5
   health_check_interval_secs: 60
   state_file: "certstream_state.json"
-  batch_size: 256
+  # Entries requested per get-entries call. Servers clamp to their own max;
+  # the watcher adapts to whatever the server actually returns.
+  batch_size: 1024
   poll_interval_ms: 1000
+  # Get-entries windows / tiles fetched concurrently per watcher during
+  # catch-up (1-16). The per-operator token bucket allows a burst of this
+  # size, so the sustained request rate still honours the operator rate
+  # limit. 1 = sequential. (env: CERTSTREAM_CT_LOG_FETCH_CONCURRENCY)
+  fetch_concurrency: 4
   # Fresh static-CT watchers start this many leaves behind the checkpoint head.
   # Default preserves the existing head-256 behavior while avoiding full-history replay.
   start_overlap_leaves: 256

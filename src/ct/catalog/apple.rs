@@ -6,8 +6,8 @@
 //! default. Apple-only logs reach the runtime only via an explicit
 //! `custom_logs` or `static_logs` declaration.
 
-use super::verify::VerifyError;
 use super::SignedCatalog;
+use super::verify::VerifyError;
 
 pub struct Apple;
 

@@ -96,11 +96,12 @@ pub struct CertDetail {
 
 /// Issue #2: CachedCert shares the Arc<LeafCert> from the message — zero field clones
 /// when building from a parsed cert. Memory for the API cache drops ~50% vs owned fields.
+/// The source is the same Arc the broadcast message carries — two fewer String
+/// allocations per ingested cert.
 pub struct CachedCert {
     pub leaf: Arc<LeafCert>,
     pub seen: f64,
-    pub source_name: String,
-    pub source_url: String,
+    pub source: Arc<crate::models::Source>,
     pub cert_index: u64,
 }
 
@@ -344,7 +345,7 @@ pub async fn handle_cert(
         Some(cert) => {
             let cert_link = format!(
                 "{}/ct/v1/get-entries?start={}&end={}",
-                cert.source_url, cert.cert_index, cert.cert_index
+                cert.source.url, cert.cert_index, cert.cert_index
             );
             Json(CertDetail {
                 fingerprint: cert.leaf.fingerprint.to_string(),
@@ -359,7 +360,7 @@ pub async fn handle_cert(
                 all_domains: cert.leaf.all_domains.to_vec(),
                 signature_algorithm: cert.leaf.signature_algorithm.to_string(),
                 seen: cert.seen,
-                source: cert.source_name.clone(),
+                source: cert.source.name.to_string(),
                 cert_index: cert.cert_index,
                 cert_link,
             })
@@ -401,8 +402,10 @@ mod tests {
                 extensions: Extensions::default(),
             }),
             seen: 1.0,
-            source_name: "test-log".to_string(),
-            source_url: "https://ct.test/log".to_string(),
+            source: Arc::new(crate::models::Source {
+                name: Arc::from("test-log"),
+                url: Arc::from("https://ct.test/log"),
+            }),
             cert_index: 42,
         }
     }

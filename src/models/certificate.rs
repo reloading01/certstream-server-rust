@@ -1,4 +1,4 @@
-use bytes::Bytes;
+use axum::extract::ws::Utf8Bytes;
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 use std::borrow::Cow;
@@ -18,8 +18,11 @@ pub struct CertificateMessage {
 pub struct CertificateData {
     pub update_type: Cow<'static, str>,
     pub leaf_cert: Arc<LeafCert>,
+    /// Chain certs are `Arc`-shared: static-CT watchers reuse one parsed
+    /// issuer across every leaf that chains to it (serde's `rc` feature
+    /// serializes through the Arc transparently).
     #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub chain: Option<Vec<ChainCert>>,
+    pub chain: Option<Vec<Arc<ChainCert>>>,
     pub cert_index: u64,
     pub cert_link: String,
     pub seen: f64,
@@ -147,23 +150,50 @@ pub struct ChainCert {
     pub extensions: Extensions,
 }
 
+impl From<LeafCert> for ChainCert {
+    /// A chain cert is a leaf-cert parse minus the leaf-only fields
+    /// (`all_domains`, `sha256_raw`). Shared by the RFC 6962 chain parser and
+    /// the static-CT issuer cache so the field mapping lives in one place.
+    fn from(leaf: LeafCert) -> Self {
+        ChainCert {
+            subject: leaf.subject,
+            issuer: leaf.issuer,
+            serial_number: leaf.serial_number,
+            not_before: leaf.not_before,
+            not_after: leaf.not_after,
+            fingerprint: leaf.fingerprint,
+            sha1: leaf.sha1,
+            sha256: leaf.sha256,
+            signature_algorithm: leaf.signature_algorithm,
+            is_ca: leaf.is_ca,
+            as_der: leaf.as_der,
+            extensions: leaf.extensions,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Source {
     pub name: Arc<str>,
     pub url: Arc<str>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DomainsOnlyMessage {
+/// Borrow-based like `LiteMessage` — serializing the domains_only stream
+/// must not clone every domain String per certificate.
+#[derive(Debug, Clone, Serialize)]
+pub struct DomainsOnlyMessage<'a> {
     pub message_type: Cow<'static, str>,
-    pub data: DomainList,
+    pub data: &'a DomainList,
 }
 
+/// Payloads carry the UTF-8 invariant (`Utf8Bytes` wraps shared `Bytes`), so
+/// WS/SSE fan-out is a pure refcount bump per client — the O(n) UTF-8 scan
+/// happens once here at serialize time, not once per subscriber per message.
 #[derive(Debug, Clone)]
 pub struct PreSerializedMessage {
-    pub full: Bytes,
-    pub lite: Bytes,
-    pub domains_only: Bytes,
+    pub full: Utf8Bytes,
+    pub lite: Utf8Bytes,
+    pub domains_only: Utf8Bytes,
 }
 
 /// Serialize any `Serialize` value to JSON bytes.
@@ -199,24 +229,33 @@ fn serialize_json<T: Serialize>(value: &T, _capacity_hint: usize) -> Option<Vec<
     }
 }
 
+/// Serialize to a `Utf8Bytes`, validating UTF-8 exactly once. Serde output is
+/// always valid UTF-8, so the validation cannot fail in practice; `None` on
+/// the impossible path keeps the caller's existing skip semantics.
+#[inline]
+fn serialize_utf8<T: Serialize>(value: &T, capacity_hint: usize) -> Option<Utf8Bytes> {
+    let s = String::from_utf8(serialize_json(value, capacity_hint)?).ok()?;
+    Some(Utf8Bytes::from(s))
+}
+
 impl PreSerializedMessage {
     pub fn from_certificate(msg: &CertificateMessage, streams: &StreamConfig) -> Option<Self> {
         let full = if streams.full {
-            Bytes::from(serialize_json(msg, 4096)?)
+            serialize_utf8(msg, 4096)?
         } else {
-            Bytes::new()
+            Utf8Bytes::from_static("")
         };
 
         let lite = if streams.lite {
-            Bytes::from(serialize_json(&msg.to_lite(), 2048)?)
+            serialize_utf8(&msg.to_lite(), 2048)?
         } else {
-            Bytes::new()
+            Utf8Bytes::from_static("")
         };
 
         let domains_only = if streams.domains_only {
-            Bytes::from(serialize_json(&msg.to_domains_only(), 512)?)
+            serialize_utf8(&msg.to_domains_only(), 512)?
         } else {
-            Bytes::new()
+            Utf8Bytes::from_static("")
         };
 
         Some(Self {
@@ -261,10 +300,10 @@ struct LiteLeafCert<'a> {
 }
 
 impl CertificateMessage {
-    pub fn to_domains_only(&self) -> DomainsOnlyMessage {
+    pub fn to_domains_only(&self) -> DomainsOnlyMessage<'_> {
         DomainsOnlyMessage {
             message_type: Cow::Borrowed("dns_entries"),
-            data: self.data.leaf_cert.all_domains.clone(),
+            data: &self.data.leaf_cert.all_domains,
         }
     }
 
@@ -412,7 +451,7 @@ mod tests {
     fn test_pre_serialize_full_contains_certificate_update() {
         let msg = make_test_message();
         let pre = msg.pre_serialize(&StreamConfig::default()).unwrap();
-        let full_str = std::str::from_utf8(&pre.full).unwrap();
+        let full_str = pre.full.as_str();
         assert!(full_str.contains("certificate_update"));
     }
 
@@ -420,7 +459,7 @@ mod tests {
     fn test_pre_serialize_lite_does_not_contain_chain() {
         let msg = make_test_message();
         let pre = msg.pre_serialize(&StreamConfig::default()).unwrap();
-        let lite_str = std::str::from_utf8(&pre.lite).unwrap();
+        let lite_str = pre.lite.as_str();
         assert!(!lite_str.contains("\"chain\""));
     }
 
@@ -428,7 +467,7 @@ mod tests {
     fn test_pre_serialize_domains_contains_dns_entries() {
         let msg = make_test_message();
         let pre = msg.pre_serialize(&StreamConfig::default()).unwrap();
-        let domains_str = std::str::from_utf8(&pre.domains_only).unwrap();
+        let domains_str = pre.domains_only.as_str();
         assert!(domains_str.contains("dns_entries"));
     }
 

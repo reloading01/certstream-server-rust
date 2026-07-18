@@ -87,7 +87,7 @@ struct LiveCtFixture {
 
 fn build_msg(
     leaf_cert: LeafCert,
-    chain: Option<Vec<ChainCert>>,
+    chain: Option<Vec<Arc<ChainCert>>>,
     update_type: Cow<'static, str>,
     sub_ts: f64,
     cert_index: u64,
@@ -120,9 +120,9 @@ fn serialize_all(msg: &CertificateMessage) -> (String, String, String) {
     let pre = PreSerializedMessage::from_certificate(msg, &stream_all())
         .expect("pre-serialize must succeed");
     (
-        String::from_utf8(pre.full.to_vec()).expect("full utf8"),
-        String::from_utf8(pre.lite.to_vec()).expect("lite utf8"),
-        String::from_utf8(pre.domains_only.to_vec()).expect("domains_only utf8"),
+        pre.full.as_str().to_string(),
+        pre.lite.as_str().to_string(),
+        pre.domains_only.as_str().to_string(),
     )
 }
 

@@ -147,6 +147,11 @@ pub struct CtLog {
     /// Base64-encoded log ID (SHA-256 of the log's public key). Used to dedupe
     /// logs that appear in multiple log lists (e.g. Google + Apple).
     pub log_id: Option<String>,
+    /// Base64-encoded SubjectPublicKeyInfo (DER) of the log's public key, as
+    /// carried in the CT log lists. Consumed by static-CT checkpoint signature
+    /// verification (see `verify_checkpoint_signature`). `None` for logs whose
+    /// list entry omits the key or for config-defined logs without one.
+    pub key: Option<String>,
     /// Optional per-log override; `None` means use the global CT config.
     pub batch_size: Option<u64>,
     /// Optional per-log override; `None` means use the global CT config.
@@ -185,6 +190,7 @@ impl From<CustomCtLog> for CtLog {
             log_type: LogType::Rfc6962,
             log_origin: None,
             log_id: custom.expected_log_id,
+            key: None,
             batch_size: custom.batch_size,
             poll_interval_ms: custom.poll_interval_ms,
             state: None,
@@ -201,6 +207,7 @@ impl From<StaticCtLog> for CtLog {
             log_type: LogType::StaticCt,
             log_origin: static_log.log_origin,
             log_id: static_log.expected_log_id,
+            key: static_log.key,
             batch_size: static_log.batch_size,
             poll_interval_ms: static_log.poll_interval_ms,
             state: None,
@@ -253,9 +260,10 @@ pub fn local_override_conflicts(discovered: &[CtLog], overrides: &[CtLog]) -> Ve
 
         // Only check the origin when the override explicitly declares one; a
         // derived (None) origin makes no claim to contradict.
-        if let (Some(override_origin), Some(discovered_origin)) =
-            (override_log.log_origin.as_deref(), discovered_log.log_origin.as_deref())
-        {
+        if let (Some(override_origin), Some(discovered_origin)) = (
+            override_log.log_origin.as_deref(),
+            discovered_log.log_origin.as_deref(),
+        ) {
             let override_origin = normalize_log_origin(override_origin);
             let discovered_origin = normalize_log_origin(discovered_origin);
             if override_origin != discovered_origin {
@@ -279,6 +287,7 @@ fn make_test_log(description: &str, url: &str, state: Option<LogState>) -> CtLog
         log_type: LogType::Rfc6962,
         log_origin: None,
         log_id: None,
+        key: None,
         batch_size: None,
         poll_interval_ms: None,
         state,
@@ -354,6 +363,7 @@ fn parse_list(bytes: &[u8], source_name: &str) -> Vec<CtLog> {
                 log_type: LogType::Rfc6962,
                 log_origin: None,
                 log_id: raw.log_id,
+                key: raw.key,
                 batch_size: None,
                 poll_interval_ms: None,
                 state: raw.state,
@@ -369,6 +379,7 @@ fn parse_list(bytes: &[u8], source_name: &str) -> Vec<CtLog> {
                 log_type: LogType::StaticCt,
                 log_origin: Some(normalize_log_origin(&raw.submission_url)),
                 log_id: raw.log_id,
+                key: raw.key,
                 batch_size: None,
                 poll_interval_ms: None,
                 state: raw.state,
@@ -443,7 +454,12 @@ pub async fn fetch_log_list(
         } else {
             client.clone()
         };
-        Some(async move { (cat, catalog::fetch_and_verify(&fetch_client, cat.as_ref()).await) })
+        Some(async move {
+            (
+                cat,
+                catalog::fetch_and_verify(&fetch_client, cat.as_ref()).await,
+            )
+        })
     });
     let results = join_all(fetches).await;
 
@@ -500,7 +516,10 @@ pub async fn fetch_log_list(
         .map(|(log, _)| log)
         .filter(|l| l.is_usable())
         .collect();
-    info!(count = candidate_logs.len(), "checking CT log availability (authoritative set)");
+    info!(
+        count = candidate_logs.len(),
+        "checking CT log availability (authoritative set)"
+    );
 
     let health_checks: Vec<_> = candidate_logs
         .into_iter()
@@ -520,7 +539,10 @@ pub async fn fetch_log_list(
     let mut logs: Vec<CtLog> = results.into_iter().flatten().collect();
 
     let filtered_count = logs.len();
-    info!(reachable = filtered_count, "CT log availability check complete");
+    info!(
+        reachable = filtered_count,
+        "CT log availability check complete"
+    );
 
     for custom_log in custom_logs {
         logs.push(CtLog::from(custom_log));
@@ -563,25 +585,41 @@ mod tests {
 
     #[test]
     fn test_is_usable_usable_state() {
-        let log = make_test_log("test", "https://ct.example.com", Some(mk_state(true, false, false, false)));
+        let log = make_test_log(
+            "test",
+            "https://ct.example.com",
+            Some(mk_state(true, false, false, false)),
+        );
         assert!(log.is_usable());
     }
 
     #[test]
     fn test_is_usable_retired() {
-        let log = make_test_log("test", "https://ct.example.com", Some(mk_state(false, false, true, false)));
+        let log = make_test_log(
+            "test",
+            "https://ct.example.com",
+            Some(mk_state(false, false, true, false)),
+        );
         assert!(!log.is_usable());
     }
 
     #[test]
     fn test_is_usable_rejected() {
-        let log = make_test_log("test", "https://ct.example.com", Some(mk_state(false, false, false, true)));
+        let log = make_test_log(
+            "test",
+            "https://ct.example.com",
+            Some(mk_state(false, false, false, true)),
+        );
         assert!(!log.is_usable());
     }
 
     #[test]
     fn test_is_usable_both_retired_and_rejected() {
-        let log = make_test_log("test", "https://ct.example.com", Some(mk_state(true, false, true, true)));
+        let log = make_test_log(
+            "test",
+            "https://ct.example.com",
+            Some(mk_state(true, false, true, true)),
+        );
         assert!(!log.is_usable());
     }
 
@@ -655,15 +693,13 @@ mod tests {
             url: "https://mon.willow.ct.letsencrypt.org/2025h2d/".to_string(),
             log_origin: Some("log.willow.ct.letsencrypt.org/2025h2d".to_string()),
             expected_log_id: None,
+            key: None,
             batch_size: None,
             poll_interval_ms: None,
         };
         let ct_log = CtLog::from(static_log);
         assert_eq!(ct_log.description, "LE Willow 2025h2");
-        assert_eq!(
-            ct_log.url,
-            "https://mon.willow.ct.letsencrypt.org/2025h2d/"
-        );
+        assert_eq!(ct_log.url, "https://mon.willow.ct.letsencrypt.org/2025h2d/");
         assert_eq!(ct_log.operator, "Static CT");
         assert_eq!(ct_log.log_type, LogType::StaticCt);
         assert_eq!(
@@ -681,6 +717,7 @@ mod tests {
             url: "https://mon.willow.ct.letsencrypt.org/2025h2d/".to_string(),
             log_origin: Some("log.willow.ct.letsencrypt.org/2025h2d".to_string()),
             expected_log_id: Some("static-log-id".to_string()),
+            key: None,
             batch_size: Some(64),
             poll_interval_ms: Some(3000),
         };
@@ -814,9 +851,18 @@ mod tests {
         assert!(parsed.operators[0].logs.is_empty());
         assert_eq!(parsed.operators[0].tiled_logs.len(), 1);
         let tiled = &parsed.operators[0].tiled_logs[0];
-        assert_eq!(tiled.monitoring_url, "https://raio2025h2b.ct.cloudflare.com/");
-        assert_eq!(tiled.submission_url, "https://ct.cloudflare.com/logs/raio2025h2b/");
-        assert_eq!(tiled.log_id.as_deref(), Some("Tw05u8NV28wWJ5ZuVAUVfMr3Lj90j0f+ewSeWlkVXL0="));
+        assert_eq!(
+            tiled.monitoring_url,
+            "https://raio2025h2b.ct.cloudflare.com/"
+        );
+        assert_eq!(
+            tiled.submission_url,
+            "https://ct.cloudflare.com/logs/raio2025h2b/"
+        );
+        assert_eq!(
+            tiled.log_id.as_deref(),
+            Some("Tw05u8NV28wWJ5ZuVAUVfMr3Lj90j0f+ewSeWlkVXL0=")
+        );
 
         assert_eq!(parsed.operators[1].name, "Old Operator");
         assert_eq!(parsed.operators[1].logs.len(), 1);
@@ -874,15 +920,28 @@ mod tests {
         let logs = parse_list(json, "test_source");
         assert_eq!(logs.len(), 2, "one RFC6962 + one static-CT entry");
 
-        let rfc = logs.iter().find(|l| l.log_type == LogType::Rfc6962).unwrap();
+        let rfc = logs
+            .iter()
+            .find(|l| l.log_type == LogType::Rfc6962)
+            .unwrap();
         assert_eq!(rfc.operator, "digicert inc", "operator canonicalized");
-        assert_eq!(rfc.url, "https://ct.digicert.com/log", "url normalized (scheme + no trailing slash)");
+        assert_eq!(
+            rfc.url, "https://ct.digicert.com/log",
+            "url normalized (scheme + no trailing slash)"
+        );
         assert_eq!(rfc.log_id.as_deref(), Some("rfc-id-1"));
 
-        let tiled = logs.iter().find(|l| l.log_type == LogType::StaticCt).unwrap();
+        let tiled = logs
+            .iter()
+            .find(|l| l.log_type == LogType::StaticCt)
+            .unwrap();
         assert_eq!(tiled.operator, "digicert inc");
         assert_eq!(tiled.url, "https://mon.example.com/tiled");
-        assert_eq!(tiled.log_origin.as_deref(), Some("ct.example.com/tiled"), "origin normalized");
+        assert_eq!(
+            tiled.log_origin.as_deref(),
+            Some("ct.example.com/tiled"),
+            "origin normalized"
+        );
         // The unknown `state` enum key did not crash the parse.
     }
 

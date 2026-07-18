@@ -15,11 +15,11 @@ This Rust implementation is a drop-in replacement that maintains full compatibil
 
 ### Why Rust?
 
-- ~118 MiB stable RSS under load (default config + 100 WS clients, 10-min plateau); plateau within ~5 minutes of startup, no growth over time
-- Single shared issuer cache across all static-CT watchers — no per-log cache duplication
-- Pre-serialized broadcast via `Arc<PreSerializedMessage>` with zero-copy `Utf8Bytes` Text frames — no per-subscriber JSON re-encoding
+- Flat resident memory that tracks live usage (jemalloc allocator) — catch-up bursts don't park RSS at the high-water mark, no growth over time
+- Keeps pace with live CT issuance: pipelined catch-up fetches with an unchanged per-operator request rate
+- Single shared issuer cache (pre-parsed certs) across all static-CT watchers — no per-log cache duplication, no re-parsing shared intermediates
+- Pre-serialized broadcast via `Arc<PreSerializedMessage>` with zero-copy `Utf8Bytes` Text frames — no per-subscriber JSON re-encoding, no per-subscriber UTF-8 validation
 - Idle-server pre-serialize guard — JSON serialization skipped entirely when `receiver_count() == 0`
-- ~1,000 msg/s sustained CT ingest rate; tens of MB/s WS broadcast headroom
 - SIMD-accelerated JSON via `simd-json` (enabled by default)
 - Single binary, no runtime dependencies
 
@@ -137,7 +137,8 @@ rate_limit:
 | `CERTSTREAM_CT_LOG_STATE_FILE` | certstream_state.json | State file path |
 | `CERTSTREAM_CT_LOG_RETRY_MAX_ATTEMPTS` | 3 | Max retry attempts |
 | `CERTSTREAM_CT_LOG_REQUEST_TIMEOUT_SECS` | 30 | Request timeout |
-| `CERTSTREAM_CT_LOG_BATCH_SIZE` | 256 | Entries per batch |
+| `CERTSTREAM_CT_LOG_BATCH_SIZE` | 1024 | Entries requested per get-entries call (servers clamp to their own max) |
+| `CERTSTREAM_CT_LOG_FETCH_CONCURRENCY` | 4 | Concurrent range/tile fetches per watcher during catch-up (1-16) |
 
 **Hot Reload**
 
@@ -208,20 +209,16 @@ curl http://localhost:8080/health/deep
 
 ## Performance
 
-Measured with 100 concurrent WebSocket clients pulling the lite stream, default config, 10-minute plateau window:
+Benchmarked against v1.5.2 on the same host — default config, 100 concurrent WebSocket clients pulling the lite stream, 10-minute plateau window:
 
-| Metric | Value |
-|--------|------:|
-| Memory — steady, no clients | 113–118 MiB |
-| Memory — peak, 100 clients | 118 MiB |
-| Plateau swing | ±5 MiB |
-| CPU — avg, 100 clients | ~13 % |
-| Sustained CT ingest | ~1,000 cert/s |
-| Cold start to first cert | <2 s |
+| Metric (vs v1.5.2, identical conditions) | Change |
+|------------------------------------------|-------:|
+| Sustained delivered throughput | ~+70% |
+| CPU per delivered message | ~−50% |
+| RSS after catch-up bursts | returns to idle baseline (previously parked at peak) |
+| Cold start to first cert | seconds |
 
-Memory settles within roughly five minutes of startup and stays flat — no GC pauses, no growth over time. Every certificate is serialized once and broadcast to all subscribers via an `Arc<PreSerializedMessage>` with zero-copy text frames; when no clients are connected, serialization is skipped entirely. The default 200K-entry cross-log dedup window costs only a few MiB and is tunable via `CERTSTREAM_DEDUP_CAPACITY`.
-
-Reproduce these numbers locally with the scripts in `soak/`.
+Every certificate is serialized once and broadcast to all subscribers via an `Arc<PreSerializedMessage>` with zero-copy text frames; when no clients are connected, serialization is skipped entirely. Catch-up fetches are pipelined per watcher while the per-operator request rate stays within the same politeness budget as sequential fetching. Memory stays flat over time — jemalloc returns burst allocations to the OS instead of parking RSS at the high-water mark. The default 200K-entry cross-log dedup window costs only a few MiB and is tunable via `CERTSTREAM_DEDUP_CAPACITY`.
 
 ## Certificate Transparency Logs
 

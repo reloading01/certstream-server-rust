@@ -105,15 +105,16 @@ fn process_message(
     msg: Arc<PreSerializedMessage>,
     stream_type: SseStreamType,
 ) -> Option<Result<Event, std::convert::Infallible>> {
-    let bytes = match stream_type {
+    let text = match stream_type {
         SseStreamType::Full => &msg.full,
         SseStreamType::DomainsOnly => &msg.domains_only,
         SseStreamType::Lite => &msg.lite,
     };
 
-    std::str::from_utf8(bytes)
-        .ok()
-        .map(|json_str| Ok(Event::default().data(json_str)))
+    // Payloads are pre-validated Utf8Bytes — no per-client UTF-8 scan here.
+    // (Event::data still copies into the event's own buffer; that copy is
+    // inherent to axum's SSE Event API.)
+    Some(Ok(Event::default().data(text.as_str())))
 }
 
 struct SseStreamWrapper<S> {

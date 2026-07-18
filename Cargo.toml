@@ -1,6 +1,6 @@
 [package]
 name = "certstream-server-rust"
-version = "1.5.2"
+version = "1.5.3"
 edition = "2024"
 repository = "https://github.com/reloading01/certstream-server-rust"
 license = "MIT"
@@ -77,6 +77,15 @@ quick_cache = "0.6"
 rsa = { version = "0.9.10", features = ["sha2", "pem"] }
 rustls = "0.23"
 rustls-native-certs = "0.8"
+static_ct_api = "0.2"
+signed_note = "0.2"
+p256 = { version = "0.13", features = ["pkcs8", "ecdsa"] }
+
+# jemalloc as global allocator: the ingest workload churns multi-MB transient
+# buffers across ~100 tasks; system allocators retain the freed pages in
+# arenas and RSS parks at the high-water mark. Not available on MSVC.
+[target.'cfg(not(target_env = "msvc"))'.dependencies]
+tikv-jemallocator = "0.6"
 
 [dev-dependencies]
 rcgen = "0.14"

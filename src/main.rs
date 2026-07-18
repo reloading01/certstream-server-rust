@@ -38,6 +38,16 @@ use sse::handle_sse_stream;
 use state::StateManager;
 use websocket::{handle_domains_only, handle_full_stream, handle_lite_stream, AppState, ConnectionCounter};
 
+// The workload alloc/frees multi-MB tile and batch buffers across ~100 watcher
+// tasks every poll. The system allocator (macOS malloc / glibc) keeps those
+// freed pages in per-thread arenas, so RSS settles near the transient
+// high-water mark (~400 MB observed) instead of the ~100-150 MB live heap.
+// jemalloc returns dirty pages to the OS on a ~10 s decay, keeping RSS close
+// to actual usage.
+#[cfg(not(target_env = "msvc"))]
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 // CT polling + WS broadcast are heavily I/O-bound; CPU work is bursty (JSON
 // parse + cert deserialise) and cheap relative to the network wait. 4 worker
 // threads is plenty in practice and saves ~8 MiB of resident memory vs the
@@ -134,9 +144,10 @@ async fn main() {
         .user_agent(format!("certstream-server-rust/{}", VERSION))
         // Pre-1.5.0 kept 20 idle connections per host × 55 hosts = 1100
         // hot TCP sockets, ~40-55 MiB of kernel + TLS state per process.
-        // CT log polls are sequential per watcher (rate-limited at the
-        // OperatorLimiter); 4 idle per host is enough for retry overlap.
-        .pool_max_idle_per_host(2)
+        // Watchers now pipeline up to `fetch_concurrency` range/tile fetches
+        // during catch-up, so keep that many idle connections per host (with
+        // HTTP/2 they multiplex over fewer; this matters for HTTP/1.1 hosts).
+        .pool_max_idle_per_host((config.ct_log.fetch_concurrency as usize).max(2))
         .pool_idle_timeout(Duration::from_secs(30))
         // Global timeout for catalog list/signature fetches. Watcher fetches
         // also set per-request bounds; this backstops shared-client requests.
@@ -532,7 +543,12 @@ fn spawn_pool(
                 .get(&op)
                 .copied()
                 .unwrap_or(ctx.config.default_operator_rate_limit_ms);
-            Arc::new(ct::OperatorLimiter::new(Duration::from_millis(ms)))
+            // Burst = fetch_concurrency so a watcher can pipeline its
+            // catch-up fetches; sustained rate stays 1 per `ms`.
+            Arc::new(ct::OperatorLimiter::with_burst(
+                Duration::from_millis(ms),
+                ctx.config.fetch_concurrency,
+            ))
         });
         log_tracker.register(
             log.description.clone(),

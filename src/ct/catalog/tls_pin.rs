@@ -16,11 +16,13 @@
 
 use std::sync::Arc;
 
-use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::client::WebPkiServerVerifier;
+use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::crypto::aws_lc_rs;
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
-use rustls::{ClientConfig, DigitallySignedStruct, Error as RustlsError, RootCertStore, SignatureScheme};
+use rustls::{
+    ClientConfig, DigitallySignedStruct, Error as RustlsError, RootCertStore, SignatureScheme,
+};
 use sha2::{Digest, Sha256};
 use tracing::{error, warn};
 
@@ -67,8 +69,13 @@ impl ServerCertVerifier for PinnedIssuerVerifier {
         now: UnixTime,
     ) -> Result<ServerCertVerified, RustlsError> {
         // 1) Normal WebPKI validation first — never weaken it.
-        self.inner
-            .verify_server_cert(end_entity, intermediates, server_name, ocsp_response, now)?;
+        self.inner.verify_server_cert(
+            end_entity,
+            intermediates,
+            server_name,
+            ocsp_response,
+            now,
+        )?;
 
         // 2) Issuer-SPKI pin: the pinned CA must be in the presented chain.
         if chain_contains_pin(intermediates, &self.pin) {
@@ -145,7 +152,10 @@ pub fn build_apple_pinned_client(timeout: std::time::Duration) -> Result<reqwest
         .with_no_client_auth();
 
     reqwest::Client::builder()
-        .user_agent(concat!("certstream-server-rust/", env!("CARGO_PKG_VERSION")))
+        .user_agent(concat!(
+            "certstream-server-rust/",
+            env!("CARGO_PKG_VERSION")
+        ))
         .use_preconfigured_tls(config)
         .timeout(timeout)
         .build()

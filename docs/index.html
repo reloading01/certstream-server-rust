@@ -216,31 +216,31 @@
                 <div class="section-header">
                     <span class="eyebrow">Performance</span>
                     <h2>Measured, not marketed.</h2>
-                    <p>Default config, 100 concurrent WebSocket clients pulling the lite stream, 10-minute plateau window.</p>
+                    <p>v1.5.3 benchmarked against v1.5.2 on the same host — default config, 100 concurrent WebSocket clients pulling the lite stream, 10-minute plateau window.</p>
                 </div>
                 <div class="stat-grid">
                     <div class="stat-cell">
-                        <div class="num">~118<span class="unit">MiB</span></div>
-                        <div class="lbl">Stable RSS · 100 clients</div>
+                        <div class="num">+70<span class="unit">%</span></div>
+                        <div class="lbl">Sustained throughput vs v1.5.2</div>
                     </div>
                     <div class="stat-cell">
-                        <div class="num">±5<span class="unit">MiB</span></div>
-                        <div class="lbl">Plateau swing</div>
+                        <div class="num">−50<span class="unit">%</span></div>
+                        <div class="lbl">CPU per delivered message</div>
                     </div>
                     <div class="stat-cell">
-                        <div class="num">~13<span class="unit">%</span></div>
-                        <div class="lbl">CPU · 100 clients</div>
+                        <div class="num">0</div>
+                        <div class="lbl">Copies per subscriber broadcast</div>
                     </div>
                     <div class="stat-cell">
-                        <div class="num">~1K<span class="unit">/s</span></div>
-                        <div class="lbl">Sustained ingest</div>
+                        <div class="num">flat</div>
+                        <div class="lbl">RSS over time · returns to baseline after bursts</div>
                     </div>
                 </div>
                 <p style="margin-top: 28px; color: var(--ink-3); font-size: 0.9rem; max-width: 70ch;">
-                    Memory settles within roughly five minutes of startup and stays flat — no GC pauses, no growth over
-                    time. Every certificate is serialized once and broadcast to all subscribers via an
-                    <code>Arc&lt;PreSerializedMessage&gt;</code> with zero-copy text frames; when no clients are connected,
-                    serialization is skipped entirely. Reproduce these numbers locally with the scripts in <code>soak/</code>.
+                    Memory tracks live usage and stays flat — no GC pauses, no growth over time, and catch-up bursts
+                    no longer park RSS at the high-water mark. Every certificate is serialized once and broadcast to
+                    all subscribers via an <code>Arc&lt;PreSerializedMessage&gt;</code> with zero-copy text frames;
+                    when no clients are connected, serialization is skipped entirely.
                 </p>
             </div>
         </section>

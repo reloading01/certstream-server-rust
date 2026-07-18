@@ -1,3 +1,83 @@
+# Release Notes — v1.5.3
+
+**Release date:** July 18, 2026
+
+v1.5.3 is a throughput and memory release, plus one new security feature: static-CT checkpoint signature verification. No wire-format changes — the JSON payloads are byte-identical to v1.5.2 (locked by snapshot tests).
+
+## Performance
+
+Measured on the same host, same config, 100 WebSocket clients on the lite stream, against v1.5.2 under identical conditions:
+
+* **~70% higher sustained throughput.** v1.5.2's sequential fetching couldn't keep pace with live CT issuance on the test host; v1.5.3 does, with headroom.
+* **CPU per delivered message roughly halved.** Total CPU is lower even while doing ~1.7× the work.
+* **RSS now tracks live usage.** Catch-up bursts no longer park resident memory at the high-water mark — after a burst, RSS returns to its idle baseline within seconds. Long-running deployments that previously plateaued at several times their live heap should see the difference immediately.
+
+### What changed
+
+**Ingest pipeline.**
+
+* get-entries / tile fetches are now pipelined `fetch_concurrency`-deep per watcher (default 4). The per-operator rate limiter became a token bucket with a burst of the same size, so the **sustained request rate toward log operators is unchanged** — concurrency only hides latency.
+* RFC 6962 watchers drain the whole backlog under one STH instead of re-fetching `get-sth` per batch (the static-CT tile loop already worked this way).
+* Default `batch_size` raised 256 → 1024. Servers clamp to their own maximum (spec-legal); the watcher adapts its window to whatever page size the server actually serves, so pipelined windows stay aligned.
+* All CPU-heavy work — base64, X.509 parsing, hashing, tile decompression — moved off the async runtime onto the blocking pool. Catch-up storms across many watchers no longer starve polling, broadcasting, or health checks.
+
+**Per-certificate CPU.**
+
+* The shared issuer cache stores **parsed** `Arc<ChainCert>`s instead of raw DER. A tile whose 256 leaves chain to the same intermediate now pays one parse instead of 256. Unparseable issuers are negative-cached (fetched at most once).
+* `as_der` (base64 of the full DER), chain building, and issuer prefetching are skipped entirely when the `full` stream is disabled — they have no other consumer.
+* Pre-serialized payloads carry the UTF-8 invariant (`Utf8Bytes`), removing the per-client-per-message UTF-8 scan on both WebSocket and SSE fan-out.
+* The dedup map hashes its SHA-256 keys with ahash instead of SipHash (the key is already uniformly distributed).
+* Auth middleware reads one config snapshot per request instead of cloning the token list up to three times.
+
+**Memory.**
+
+* jemalloc (`tikv-jemallocator`) is the global allocator on non-MSVC targets. The ingest workload churns multi-MB transient buffers across ~100 tasks; system allocators retain those freed pages in arenas, which is exactly the "RSS parked at peak" behavior this replaces.
+* The per-watcher JSON parse buffer hands burst-sized capacity back once a log is caught up instead of retaining its catch-up peak forever — previously the single biggest steady-state RSS contributor.
+* Static-CT tile leaves are zero-copy `Bytes` slices of the shared tile buffer (was: one heap copy per leaf, ~256 allocations per tile).
+* The REST cache shares the message's `Arc<Source>` instead of allocating two `String`s per certificate; `domains_only` serialization no longer clones the domain list.
+
+## Static-CT checkpoint signature verification
+
+Checkpoints are now verified against the log's ECDSA P-256 key from the signed catalog (signed-note `TreeHeadSignature`, per c2sp.org/static-ct-api):
+
+* `ct_log.checkpoint_signature_mode: warn` (default) verifies and counts failures but never blocks ingest; `enforce` rejects checkpoints whose signature is present but fails. Checkpoints that *cannot* be verified (no usable P-256 key) are accepted in both modes — inability to verify is not proof of forgery.
+* `static_logs` entries accept an optional `key` (base64 SPKI DER) for logs outside the catalog.
+* Env override: `CERTSTREAM_STATIC_CT_CHECKPOINT_SIGNATURE`.
+
+New metrics: `certstream_static_ct_checkpoint_sig_verified`, `..._sig_failed`, `..._sig_unverifiable`.
+
+## Reliability
+
+**Shutdown atomicity.** Batch processing and the state checkpoint now run as one detached unit: a shutdown arriving mid-batch can no longer broadcast entries without persisting the index, which previously caused those entries to be re-broadcast after a restart.
+
+## Configuration
+
+| Setting | Old | New |
+| ------- | --: | --: |
+| `ct_log.batch_size` | 256 | 1024 |
+| `ct_log.fetch_concurrency` | — | 4 (new, 1-16; env `CERTSTREAM_CT_LOG_FETCH_CONCURRENCY`) |
+| `ct_log.checkpoint_signature_mode` | — | `warn` (new) |
+
+Setting `fetch_concurrency: 1` restores the v1.5.2 sequential fetch behavior.
+
+## New dependencies
+
+`tikv-jemallocator` (global allocator, non-MSVC), `static_ct_api` + `signed_note` + `p256` (checkpoint signature verification).
+
+## Tests
+
+251 unit tests (was 249) plus the integration/snapshot suites. Snapshot tests confirm the serialized JSON output is unchanged.
+
+## Upgrade
+
+```bash
+docker pull ghcr.io/reloading01/certstream-server-rust:1.5.3
+```
+
+Drop-in upgrade from v1.5.2. Existing configs keep working; the new keys are optional.
+
+---
+
 # Release Notes — v1.5.2
 
 **Release date:** June 16, 2026

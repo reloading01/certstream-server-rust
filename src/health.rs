@@ -132,7 +132,7 @@ pub async fn example_json() -> Json<CertificateMessage> {
                 as_der: Some("BASE64_ENCODED_DER_DATA".to_string()),
                 extensions,
             }),
-            chain: Some(vec![ChainCert {
+            chain: Some(vec![Arc::new(ChainCert {
                 subject: issuer,
                 issuer: chain_issuer,
                 serial_number: "00112233445566".to_string(),
@@ -145,7 +145,7 @@ pub async fn example_json() -> Json<CertificateMessage> {
                 is_ca: true,
                 as_der: Some("BASE64_ENCODED_CA_DER".to_string()),
                 extensions: chain_extensions,
-            }]),
+            })]),
             cert_index: 123456789,
             cert_link: "https://ct.googleapis.com/logs/us1/argon2025h2/ct/v1/get-entries?start=123456789&end=123456789".to_string(),
             seen: 1704067200.123,

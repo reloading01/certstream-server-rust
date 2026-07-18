@@ -1,5 +1,5 @@
 use ahash::AHashSet;
-use base64::{engine::general_purpose::STANDARD, Engine};
+use base64::{Engine, engine::general_purpose::STANDARD};
 use sha1::Sha1;
 use sha2::{Digest, Sha256};
 use smallvec::SmallVec;
@@ -64,7 +64,7 @@ pub struct ParsedEntry {
 impl ParsedEntry {
     /// Parse the certificate chain from the stored extra_data.
     /// Call this only after confirming the leaf cert passes dedup filtering.
-    pub fn parse_chain(&self) -> Vec<ChainCert> {
+    pub fn parse_chain(&self) -> Vec<Arc<ChainCert>> {
         parse_chain_from_bytes(&self.chain_extra_bytes, self.chain_offset, self.parse_opts)
     }
 }
@@ -251,7 +251,8 @@ pub fn parse_certificate_with_options(der_bytes: &[u8], opts: ParseOptions) -> O
     let mut seen_domains: AHashSet<&str> = AHashSet::with_capacity(8);
 
     if let Some(ref cn) = subject.cn
-        && !cn.is_empty() && !is_ca
+        && !cn.is_empty()
+        && !is_ca
     {
         // Issue #8: borrow cn into the set (no clone); one clone only for all_domains.
         seen_domains.insert(cn.as_str());
@@ -289,7 +290,11 @@ pub fn parse_certificate_with_options(der_bytes: &[u8], opts: ParseOptions) -> O
     })
 }
 
-fn parse_chain_from_bytes(bytes: &[u8], start_offset: usize, opts: ParseOptions) -> Vec<ChainCert> {
+fn parse_chain_from_bytes(
+    bytes: &[u8],
+    start_offset: usize,
+    opts: ParseOptions,
+) -> Vec<Arc<ChainCert>> {
     let mut chain = Vec::with_capacity(4);
 
     if bytes.len() <= start_offset + 3 {
@@ -329,20 +334,7 @@ fn parse_chain_from_bytes(bytes: &[u8], start_offset: usize, opts: ParseOptions)
             parse_extensions: opts.parse_extensions,
         };
         if let Some(leaf) = parse_certificate_with_options(cert_bytes, chain_opts) {
-            chain.push(ChainCert {
-                subject: leaf.subject,
-                issuer: leaf.issuer,
-                serial_number: leaf.serial_number,
-                not_before: leaf.not_before,
-                not_after: leaf.not_after,
-                fingerprint: leaf.fingerprint,
-                sha1: leaf.sha1,
-                sha256: leaf.sha256,
-                signature_algorithm: leaf.signature_algorithm,
-                is_ca: leaf.is_ca,
-                as_der: leaf.as_der,
-                extensions: leaf.extensions,
-            });
+            chain.push(Arc::new(ChainCert::from(leaf)));
         }
 
         offset += cert_len;
@@ -504,7 +496,10 @@ fn parse_extensions<'cert>(
             ParsedExtension::CertificatePolicies(policies) => {
                 let mut policy_strs: SmallVec<[String; 2]> = SmallVec::new();
                 for policy in policies.iter() {
-                    push_formatted(&mut policy_strs, format_args!("Policy: {}\n", policy.policy_id));
+                    push_formatted(
+                        &mut policy_strs,
+                        format_args!("Policy: {}\n", policy.policy_id),
+                    );
                 }
                 if !policy_strs.is_empty() {
                     ext.certificate_policies = Some(policy_strs.concat());
@@ -688,23 +683,35 @@ fn extended_key_usage_to_string(eku: &ExtendedKeyUsage) -> String {
     parts.join(", ")
 }
 
-const OID_X509_EXT_CT_POISON: Oid<'static> = oid!(1.3.6 .1 .4 .1 .11129 .2 .4 .3);
+const OID_X509_EXT_CT_POISON: Oid<'static> = oid!(1.3.6.1.4.1.11129.2.4.3);
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use base64::{engine::general_purpose::STANDARD, Engine};
+    use base64::{Engine, engine::general_purpose::STANDARD};
 
     fn generate_self_signed_der(cn: &str) -> Vec<u8> {
         let mut params = rcgen::CertificateParams::new(vec![]).unwrap();
         params.distinguished_name = rcgen::DistinguishedName::new();
-        params.distinguished_name.push(rcgen::DnType::CommonName, cn);
-        params.distinguished_name.push(rcgen::DnType::OrganizationName, "Test Org");
-        params.distinguished_name.push(rcgen::DnType::CountryName, "US");
-        params.distinguished_name.push(rcgen::DnType::LocalityName, "San Francisco");
-        params.distinguished_name.push(rcgen::DnType::StateOrProvinceName, "California");
+        params
+            .distinguished_name
+            .push(rcgen::DnType::CommonName, cn);
+        params
+            .distinguished_name
+            .push(rcgen::DnType::OrganizationName, "Test Org");
+        params
+            .distinguished_name
+            .push(rcgen::DnType::CountryName, "US");
+        params
+            .distinguished_name
+            .push(rcgen::DnType::LocalityName, "San Francisco");
+        params
+            .distinguished_name
+            .push(rcgen::DnType::StateOrProvinceName, "California");
         params.is_ca = rcgen::IsCa::NoCa;
-        let cert = params.self_signed(&rcgen::KeyPair::generate().unwrap()).unwrap();
+        let cert = params
+            .self_signed(&rcgen::KeyPair::generate().unwrap())
+            .unwrap();
         cert.der().to_vec()
     }
 
@@ -712,18 +719,26 @@ mod tests {
         let san_strings: Vec<String> = sans.iter().map(|s| s.to_string()).collect();
         let mut params = rcgen::CertificateParams::new(san_strings).unwrap();
         params.distinguished_name = rcgen::DistinguishedName::new();
-        params.distinguished_name.push(rcgen::DnType::CommonName, cn);
+        params
+            .distinguished_name
+            .push(rcgen::DnType::CommonName, cn);
         params.is_ca = rcgen::IsCa::NoCa;
-        let cert = params.self_signed(&rcgen::KeyPair::generate().unwrap()).unwrap();
+        let cert = params
+            .self_signed(&rcgen::KeyPair::generate().unwrap())
+            .unwrap();
         cert.der().to_vec()
     }
 
     fn generate_ca_cert_der(cn: &str) -> Vec<u8> {
         let mut params = rcgen::CertificateParams::new(vec![]).unwrap();
         params.distinguished_name = rcgen::DistinguishedName::new();
-        params.distinguished_name.push(rcgen::DnType::CommonName, cn);
+        params
+            .distinguished_name
+            .push(rcgen::DnType::CommonName, cn);
         params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
-        let cert = params.self_signed(&rcgen::KeyPair::generate().unwrap()).unwrap();
+        let cert = params
+            .self_signed(&rcgen::KeyPair::generate().unwrap())
+            .unwrap();
         cert.der().to_vec()
     }
 
@@ -875,7 +890,10 @@ mod tests {
     fn test_parse_certificate_valid_der() {
         let der = generate_self_signed_der("test.com");
         let result = parse_certificate(&der, true);
-        assert!(result.is_some(), "parse_certificate should succeed for a valid DER cert");
+        assert!(
+            result.is_some(),
+            "parse_certificate should succeed for a valid DER cert"
+        );
 
         let leaf = result.unwrap();
 
@@ -907,10 +925,16 @@ mod tests {
 
         // SHA1 and SHA256 fingerprints should be colon-separated hex
         assert!(leaf.sha1.contains(':'), "sha1 should be colon-separated");
-        assert!(leaf.sha256.contains(':'), "sha256 should be colon-separated");
+        assert!(
+            leaf.sha256.contains(':'),
+            "sha256 should be colon-separated"
+        );
 
         // sha256_raw should be non-zero for a real cert
-        assert_ne!(leaf.sha256_raw, [0u8; 32], "sha256_raw should not be all zeros");
+        assert_ne!(
+            leaf.sha256_raw, [0u8; 32],
+            "sha256_raw should not be all zeros"
+        );
 
         // fingerprint == sha1
         assert_eq!(&*leaf.fingerprint, leaf.sha1.as_str());
@@ -928,9 +952,21 @@ mod tests {
 
         // Subject aggregated field should contain /CN=test.com
         let agg = leaf.subject.aggregated.as_ref().unwrap();
-        assert!(agg.contains("/CN=test.com"), "aggregated should contain /CN=test.com, got: {}", agg);
-        assert!(agg.contains("/O=Test Org"), "aggregated should contain /O=Test Org, got: {}", agg);
-        assert!(agg.contains("/C=US"), "aggregated should contain /C=US, got: {}", agg);
+        assert!(
+            agg.contains("/CN=test.com"),
+            "aggregated should contain /CN=test.com, got: {}",
+            agg
+        );
+        assert!(
+            agg.contains("/O=Test Org"),
+            "aggregated should contain /O=Test Org, got: {}",
+            agg
+        );
+        assert!(
+            agg.contains("/C=US"),
+            "aggregated should contain /C=US, got: {}",
+            agg
+        );
 
         // all_domains should include "test.com" from the CN (no SANs in this cert)
         assert!(
@@ -948,7 +984,11 @@ mod tests {
         // subject_key_identifier may or may not be present depending on rcgen version.
         // If present, it should start with "keyid:"
         if let Some(ref ski) = leaf.extensions.subject_key_identifier {
-            assert!(ski.starts_with("keyid:"), "SKI should start with keyid:, got: {}", ski);
+            assert!(
+                ski.starts_with("keyid:"),
+                "SKI should start with keyid:, got: {}",
+                ski
+            );
         }
     }
 
@@ -958,7 +998,10 @@ mod tests {
         let result = parse_certificate(&der, false);
         assert!(result.is_some());
         let leaf = result.unwrap();
-        assert!(leaf.as_der.is_none(), "as_der should be None when include_der=false");
+        assert!(
+            leaf.as_der.is_none(),
+            "as_der should be None when include_der=false"
+        );
     }
 
     #[test]
@@ -974,22 +1017,47 @@ mod tests {
 
     #[test]
     fn test_parse_certificate_with_sans() {
-        let der = generate_cert_with_sans("primary.com", &["alt1.com", "alt2.com", "*.wildcard.com"]);
+        let der =
+            generate_cert_with_sans("primary.com", &["alt1.com", "alt2.com", "*.wildcard.com"]);
         let leaf = parse_certificate(&der, true).unwrap();
 
         assert_eq!(leaf.subject.cn.as_deref(), Some("primary.com"));
 
         // all_domains should contain the CN plus all SANs (deduplicated)
-        assert!(leaf.all_domains.iter().any(|d| d == "primary.com"), "should contain CN");
-        assert!(leaf.all_domains.iter().any(|d| d == "alt1.com"), "should contain alt1.com SAN");
-        assert!(leaf.all_domains.iter().any(|d| d == "alt2.com"), "should contain alt2.com SAN");
-        assert!(leaf.all_domains.iter().any(|d| d == "*.wildcard.com"), "should contain wildcard SAN");
+        assert!(
+            leaf.all_domains.iter().any(|d| d == "primary.com"),
+            "should contain CN"
+        );
+        assert!(
+            leaf.all_domains.iter().any(|d| d == "alt1.com"),
+            "should contain alt1.com SAN"
+        );
+        assert!(
+            leaf.all_domains.iter().any(|d| d == "alt2.com"),
+            "should contain alt2.com SAN"
+        );
+        assert!(
+            leaf.all_domains.iter().any(|d| d == "*.wildcard.com"),
+            "should contain wildcard SAN"
+        );
 
         // SAN extension should be present
         let san = leaf.extensions.subject_alt_name.as_ref().unwrap();
-        assert!(san.contains("DNS:alt1.com"), "SAN should contain DNS:alt1.com, got: {}", san);
-        assert!(san.contains("DNS:alt2.com"), "SAN should contain DNS:alt2.com, got: {}", san);
-        assert!(san.contains("DNS:*.wildcard.com"), "SAN should contain DNS:*.wildcard.com, got: {}", san);
+        assert!(
+            san.contains("DNS:alt1.com"),
+            "SAN should contain DNS:alt1.com, got: {}",
+            san
+        );
+        assert!(
+            san.contains("DNS:alt2.com"),
+            "SAN should contain DNS:alt2.com, got: {}",
+            san
+        );
+        assert!(
+            san.contains("DNS:*.wildcard.com"),
+            "SAN should contain DNS:*.wildcard.com, got: {}",
+            san
+        );
     }
 
     #[test]
@@ -999,7 +1067,10 @@ mod tests {
 
         assert_eq!(leaf.subject.cn.as_deref(), Some("My Root CA"));
         assert!(leaf.is_ca, "CA cert should have is_ca=true");
-        assert_eq!(leaf.extensions.basic_constraints.as_deref(), Some("CA:TRUE"));
+        assert_eq!(
+            leaf.extensions.basic_constraints.as_deref(),
+            Some("CA:TRUE")
+        );
 
         // CA certs should NOT add the CN to all_domains
         assert!(

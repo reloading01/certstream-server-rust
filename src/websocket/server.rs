@@ -243,28 +243,15 @@ async fn handle_socket(
             result = rx.recv() => {
                 match result {
                     Ok(msg) => {
-                        let bytes = match stream_type {
+                        // Payloads are pre-validated Utf8Bytes — cloning is a
+                        // refcount bump on the shared Bytes, no per-client
+                        // UTF-8 scan and no allocation.
+                        let text = match stream_type {
                             StreamType::Full => msg.full.clone(),
                             StreamType::Lite => msg.lite.clone(),
                             StreamType::DomainsOnly => msg.domains_only.clone(),
                         };
-
-                        // Pre-serialized JSON is guaranteed UTF-8 by serde_json,
-                        // so `Utf8Bytes::try_from(bytes)` is a zero-copy ref-bump
-                        // on the shared Bytes (no String allocation per client).
-                        // Pre-1.5.0 did `from_utf8(&bytes).to_string()` here —
-                        // one full copy per subscriber per message, defeating
-                        // the whole point of pre-serializing into shared Bytes.
-                        let frame = match Utf8Bytes::try_from(bytes.clone()) {
-                            Ok(text) => Message::Text(text),
-                            Err(_) => {
-                                // serde_json must not produce invalid UTF-8;
-                                // if it ever does, fall back to Binary rather
-                                // than drop the message silently.
-                                Message::Binary(bytes)
-                            }
-                        };
-                        if !send_with_deadline(&mut sender, frame, WRITE_TIMEOUT).await {
+                        if !send_with_deadline(&mut sender, Message::Text(text), WRITE_TIMEOUT).await {
                             break;
                         }
                         consecutive_lags = 0;
@@ -305,7 +292,6 @@ async fn handle_socket(
 mod tests {
     use super::*;
     use crate::models::PreSerializedMessage;
-    use bytes::Bytes;
     use std::sync::Arc;
     use tokio::sync::broadcast;
 
@@ -335,9 +321,9 @@ mod tests {
 
         let dummy = || {
             Arc::new(PreSerializedMessage {
-                full: Bytes::from_static(b"f"),
-                lite: Bytes::from_static(b"l"),
-                domains_only: Bytes::from_static(b"d"),
+                full: Utf8Bytes::from_static("f"),
+                lite: Utf8Bytes::from_static("l"),
+                domains_only: Utf8Bytes::from_static("d"),
             })
         };
 

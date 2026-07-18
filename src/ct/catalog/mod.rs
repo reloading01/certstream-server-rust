@@ -200,7 +200,10 @@ mod tests {
     #[test]
     fn registry_ids_match_pinned_set() {
         let ids: Vec<&str> = catalog_registry().iter().map(|c| c.name()).collect();
-        assert_eq!(ids, CATALOG_SOURCE_IDS, "registry order/IDs drifted from the pinned parity set");
+        assert_eq!(
+            ids, CATALOG_SOURCE_IDS,
+            "registry order/IDs drifted from the pinned parity set"
+        );
     }
 
     #[test]
@@ -210,7 +213,11 @@ mod tests {
         assert!(apple.expected_key_fingerprint().is_none());
         assert!(!apple.code_default_runtime_authoritative());
         // Even with an explicit override=true, an unverified source stays non-authoritative.
-        let fetch = CatalogFetch { raw_bytes: vec![], verified: false, verifier_present: false };
+        let fetch = CatalogFetch {
+            raw_bytes: vec![],
+            verified: false,
+            verifier_present: false,
+        };
         let mut ov = std::collections::HashMap::new();
         ov.insert("apple".to_string(), true);
         assert!(!effective_runtime_authoritative(&apple, &fetch, &ov));
@@ -220,11 +227,19 @@ mod tests {
     fn google_usable_authoritative_by_default_when_verified() {
         let g = GoogleV3Usable;
         assert!(g.code_default_runtime_authoritative());
-        let verified = CatalogFetch { raw_bytes: vec![], verified: true, verifier_present: true };
+        let verified = CatalogFetch {
+            raw_bytes: vec![],
+            verified: true,
+            verifier_present: true,
+        };
         let empty = std::collections::HashMap::new();
         assert!(effective_runtime_authoritative(&g, &verified, &empty));
         // A failed signature forces non-authoritative regardless of code default.
-        let failed = CatalogFetch { raw_bytes: vec![], verified: false, verifier_present: true };
+        let failed = CatalogFetch {
+            raw_bytes: vec![],
+            verified: false,
+            verifier_present: true,
+        };
         assert!(!effective_runtime_authoritative(&g, &failed, &empty));
     }
 
@@ -232,7 +247,11 @@ mod tests {
     fn google_all_non_authoritative_until_overridden() {
         let g = GoogleV3All;
         assert!(!g.code_default_runtime_authoritative());
-        let verified = CatalogFetch { raw_bytes: vec![], verified: true, verifier_present: true };
+        let verified = CatalogFetch {
+            raw_bytes: vec![],
+            verified: true,
+            verifier_present: true,
+        };
         let empty = std::collections::HashMap::new();
         assert!(!effective_runtime_authoritative(&g, &verified, &empty));
         // Operator opt-in grants authority to a verified source.

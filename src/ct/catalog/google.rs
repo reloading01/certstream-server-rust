@@ -7,8 +7,8 @@
 //! non-authoritative until an operator opts in via
 //! `ct_log.catalog_authority_overrides.google_v3_all: true`.
 
-use super::verify::{verify_rsa_sha256_pem, VerifyError};
 use super::SignedCatalog;
+use super::verify::{VerifyError, verify_rsa_sha256_pem};
 
 /// Pinned Google CT log-list signing key (SPKI PEM), bundled at compile time.
 /// Rotation = replace these bytes and refresh the test fixture pair.
