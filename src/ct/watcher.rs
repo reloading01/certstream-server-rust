@@ -995,6 +995,12 @@ pub async fn run_watcher_with_cache(log: CtLog, ctx: WatcherContext) {
                 }
             }
         }
+
+        // DigiCert signs a fresh head per request, so a caught-up watcher is
+        // never idle at the top of the loop; pace it like the static-CT loop.
+        if current_index >= tree_size {
+            sleep(poll_interval).await;
+        }
     }
 }
 
