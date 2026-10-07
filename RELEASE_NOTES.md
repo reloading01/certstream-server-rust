@@ -2,6 +2,8 @@
 
 ## v1.6.3: Catch-up speed and bounded delay
 
+**Release date:** October 7, 2026
+
 Logs that fell hours behind in v1.6.2 were behind because of how the watcher asked for entries, not because of the operators' limits. Every number below comes from 30 to 60 second runs against the live logs from a seeded position, one log operator at a time, compared with the v1.6.2 binary.
 
 ### get-entries pages
@@ -42,6 +44,14 @@ In a run against a local fake log 3,000,000 entries behind with a limit of 100,0
 - `ct_log.force_http1_operators: [digicert]`. DigiCert answered 429 to a single HTTP/2 connection above about 2 to 3 requests per second (12 of 12 requests succeeded at 2 per second, 6 of 20 failed at 5). Two logs 120,000 entries behind, 40 s: 218 entries/s over HTTP/2, 1,310 over HTTP/1.1.
 - `ct_log.fetch_concurrency: 12` for Google. Argon2027h1 serves 32 entries per request at about a second each, so 4 requests in flight read 114 entries/s against 156 produced; 12 read 256 (8 was not measured). The operator limiter still bounds the request rate, and caught-up logs keep one request in flight.
 - No per-operator interval is needed for Sectigo any more: at 256 entries per request its roughly 400 entries per second need under 2 requests per second.
+
+### Lag gauge
+
+`certstream_ct_log_lag_entries` was measured against the tree head read when a drain started, and a drain of millions of entries can run for hours, so the gauge understated the lag: a container showing 4 million entries was 16 million behind when it restarted. A drain now reads the head again every 30 s. The get-entries window also grows back by a quarter after 16 full responses in a row, where it used to stay at the smallest page the server had served for the rest of the drain.
+
+### Build
+
+The multi-platform Docker image is built per architecture on a runner of that architecture and joined by a second job, where the arm64 half used to run under QEMU. The CI run that built both images took 15 minutes, against 82 to 131 minutes for earlier runs. The workflow actions that ran on Node 20 moved to their Node 24 releases.
 
 ### Metrics
 
