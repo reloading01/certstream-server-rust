@@ -178,6 +178,14 @@ pub struct CtLogConfig {
     /// limit — concurrency only pipelines the latency. 1 = sequential.
     #[serde(default = "default_fetch_concurrency")]
     pub fetch_concurrency: u32,
+    /// Seconds a caught-up static-CT watcher waits before fetching the newest
+    /// partial tile, hoping it fills first: a full tile is fetched once and
+    /// cacheable, while each width of a partial tile is a new uncached URL. The
+    /// last 0-255 entries are delivered up to this long (plus one idle poll)
+    /// later. `0` fetches partial tiles at once.
+    /// Override with `CERTSTREAM_CT_LOG_PARTIAL_TILE_WAIT_SECS`.
+    #[serde(default = "default_partial_tile_wait_secs")]
+    pub partial_tile_wait_secs: u64,
     /// Number of leaves a fresh static-CT watcher starts behind the current checkpoint head.
     /// The default preserves the existing head-256 behavior while making the overlap tunable.
     #[serde(default = "default_start_overlap_leaves")]
@@ -441,6 +449,7 @@ impl Default for CtLogConfig {
             batch_size: default_batch_size(),
             poll_interval_ms: default_poll_interval_ms(),
             fetch_concurrency: default_fetch_concurrency(),
+            partial_tile_wait_secs: default_partial_tile_wait_secs(),
             start_overlap_leaves: default_start_overlap_leaves(),
             rfc6962_enabled: true,
             static_ct_enabled: true,
@@ -456,6 +465,7 @@ impl Default for CtLogConfig {
 }
 
 pub const MAX_START_OVERLAP_LEAVES: u64 = 100_000;
+pub const MAX_PARTIAL_TILE_WAIT_SECS: u64 = 600;
 
 /// Split a comma-separated env value into operator names, dropping blanks so
 /// `"digicert,"` and `"digicert, ,geomys"` behave like the obvious YAML list.
@@ -505,6 +515,9 @@ fn default_poll_interval_ms() -> u64 {
 }
 fn default_fetch_concurrency() -> u32 {
     4
+}
+fn default_partial_tile_wait_secs() -> u64 {
+    60
 }
 fn default_start_overlap_leaves() -> u64 {
     256
@@ -957,6 +970,10 @@ impl Config {
         env_override!(ct_log.batch_size, "CERTSTREAM_CT_LOG_BATCH_SIZE");
         env_override!(ct_log.poll_interval_ms, "CERTSTREAM_CT_LOG_POLL_INTERVAL_MS");
         env_override!(ct_log.fetch_concurrency, "CERTSTREAM_CT_LOG_FETCH_CONCURRENCY");
+        env_override!(
+            ct_log.partial_tile_wait_secs,
+            "CERTSTREAM_CT_LOG_PARTIAL_TILE_WAIT_SECS"
+        );
         env_override!(ct_log.start_overlap_leaves, "CERTSTREAM_CT_LOG_START_OVERLAP_LEAVES");
         env_override!(ct_log.rfc6962_enabled, "CERTSTREAM_RFC6962_ENABLED");
         env_override!(ct_log.static_ct_enabled, "CERTSTREAM_STATIC_CT_ENABLED");
@@ -1139,6 +1156,16 @@ impl Config {
             });
         }
 
+        if self.ct_log.partial_tile_wait_secs > MAX_PARTIAL_TILE_WAIT_SECS {
+            errors.push(ConfigValidationError {
+                field: "ct_log.partial_tile_wait_secs".to_string(),
+                message: format!(
+                    "Partial tile wait must be at most {} seconds",
+                    MAX_PARTIAL_TILE_WAIT_SECS
+                ),
+            });
+        }
+
         if self.ct_log.fetch_concurrency == 0 || self.ct_log.fetch_concurrency > 16 {
             errors.push(ConfigValidationError {
                 field: "ct_log.fetch_concurrency".to_string(),
@@ -1247,6 +1274,7 @@ mod tests {
         assert_eq!(config.batch_size, 1024);
         assert_eq!(config.poll_interval_ms, 1000);
         assert_eq!(config.fetch_concurrency, 4);
+        assert_eq!(config.partial_tile_wait_secs, 60);
         assert_eq!(config.start_overlap_leaves, 256);
         assert!(config.rfc6962_enabled);
         assert!(config.static_ct_enabled);
@@ -1657,6 +1685,23 @@ start_overlap_leaves: 1024
         assert!(errors
             .iter()
             .any(|e| e.field == "ct_log.start_overlap_leaves"));
+    }
+
+    #[test]
+    fn test_validate_partial_tile_wait_bound() {
+        let at = |secs| Config {
+            ct_log: CtLogConfig {
+                partial_tile_wait_secs: secs,
+                ..CtLogConfig::default()
+            },
+            ..test_config()
+        };
+        assert!(at(0).validate().is_ok());
+        assert!(at(MAX_PARTIAL_TILE_WAIT_SECS).validate().is_ok());
+        let errors = at(MAX_PARTIAL_TILE_WAIT_SECS + 1).validate().unwrap_err();
+        assert!(errors
+            .iter()
+            .any(|e| e.field == "ct_log.partial_tile_wait_secs"));
     }
 
     #[test]

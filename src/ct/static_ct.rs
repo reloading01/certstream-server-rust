@@ -739,6 +739,32 @@ fn full_tile_floor(tree_size: u64) -> u64 {
     (tree_size / 256) * 256
 }
 
+/// How far to read under a head of `tree_size`: the last full tile, and the
+/// newest partial one only after it has stayed partial for `wait`. Reading a
+/// partial tile starts a new wait, so a slow log is not refetched every poll.
+fn partial_tile_read_to(
+    tree_size: u64,
+    wait: Duration,
+    since: &mut Option<(u64, std::time::Instant)>,
+    now: std::time::Instant,
+) -> u64 {
+    if wait.is_zero() || tree_size.is_multiple_of(256) {
+        return tree_size;
+    }
+    let tile = tree_size / 256;
+    let started = match *since {
+        Some((t, at)) if t == tile => at,
+        _ => now,
+    };
+    if now.duration_since(started) >= wait {
+        *since = Some((tile, now));
+        tree_size
+    } else {
+        *since = Some((tile, started));
+        full_tile_floor(tree_size)
+    }
+}
+
 /// Keyed on the raw fingerprint bytes, so a cache hit renders no hex string.
 /// Only on a cache miss do we compute the hex string for the HTTP URL.
 ///
@@ -954,6 +980,9 @@ pub async fn run_static_ct_watcher(log: CtLog, ctx: WatcherContext) {
     let issuer_cache: Arc<IssuerCache> = shared_issuer_cache;
     let poll_interval = Duration::from_millis(config.poll_interval_ms);
     let mut unchanged_polls: u32 = 0;
+    let partial_tile_wait = Duration::from_secs(config.partial_tile_wait_secs);
+    // Tile index and the moment this watcher started waiting for it to fill.
+    let mut partial_tile_since: Option<(u64, std::time::Instant)> = None;
     let timeout = Duration::from_secs(config.request_timeout_secs);
     let fetch_concurrency = config.fetch_concurrency.max(1) as usize;
 
@@ -1329,7 +1358,14 @@ pub async fn run_static_ct_watcher(log: CtLog, ctx: WatcherContext) {
         let tree_size = raw_tree_size;
         let head_polled = std::time::Instant::now();
 
-        if current_index >= tree_size {
+        let read_to = partial_tile_read_to(
+            tree_size,
+            partial_tile_wait,
+            &mut partial_tile_since,
+            std::time::Instant::now(),
+        );
+
+        if current_index >= read_to {
             // Keep the tracker current even when fully caught up so that /api/logs
             // shows the correct index/tree_size instead of 0/0 after a restart.
             tracker.update(
@@ -1339,7 +1375,12 @@ pub async fn run_static_ct_watcher(log: CtLog, ctx: WatcherContext) {
                 tree_size,
                 health.total_errors(),
             );
-            sleep(super::idle_poll_delay(poll_interval, unchanged_polls)).await;
+            sleep(super::idle_poll_delay(
+                poll_interval,
+                unchanged_polls,
+                super::STATIC_CT_IDLE_CEILING,
+            ))
+            .await;
             unchanged_polls = unchanged_polls.saturating_add(1);
             continue;
         }
@@ -1351,7 +1392,7 @@ pub async fn run_static_ct_watcher(log: CtLog, ctx: WatcherContext) {
         // rate is unchanged). Tile geometry is deterministic from `tree_size`,
         // so unlike get-entries there is no partial-response realignment —
         // responses are simply processed in order.
-        'tile_loop: while current_index < tree_size && !shutdown.is_cancelled() {
+        'tile_loop: while current_index < read_to && !shutdown.is_cancelled() {
             use futures::StreamExt as _;
 
             // Copied out before the fetch stream borrows the environment.
@@ -1360,13 +1401,13 @@ pub async fn run_static_ct_watcher(log: CtLog, ctx: WatcherContext) {
             // tiles.
             let want_names = serves_names_tiles.unwrap_or(names_mode);
 
-            let end_tile = (tree_size.saturating_sub(1)) / 256;
+            let end_tile = (read_to.saturating_sub(1)) / 256;
             let first_tile = current_index / 256;
 
             let mut in_flight = futures::stream::iter((first_tile..=end_tile).map(|tile_index| {
                 let is_last_tile = tile_index == end_tile;
                 let entries_in_tile = if is_last_tile {
-                    let remainder = tree_size % 256;
+                    let remainder = read_to % 256;
                     if remainder == 0 { 256 } else { remainder }
                 } else {
                     256
@@ -1882,7 +1923,7 @@ pub async fn run_static_ct_watcher(log: CtLog, ctx: WatcherContext) {
                         chrono::Utc::now().timestamp_millis() as f64 / 1000.0,
                     );
 
-                    let next_index = ((tile_index + 1) * 256).min(tree_size);
+                    let next_index = ((tile_index + 1) * 256).min(read_to);
                     job_state_manager.update_index(&job_base_url, next_index, tree_size);
                     job_tracker.update(
                         &job_base_url,
@@ -1912,7 +1953,7 @@ pub async fn run_static_ct_watcher(log: CtLog, ctx: WatcherContext) {
                     Err(_) => break 'tile_loop,
                 }
 
-                current_index = ((tile_index + 1) * 256).min(tree_size);
+                current_index = ((tile_index + 1) * 256).min(read_to);
 
                 debug!(log = %log.description, tile = tile_index, leaves = leaf_count, "processed static CT tile");
 
@@ -1922,7 +1963,7 @@ pub async fn run_static_ct_watcher(log: CtLog, ctx: WatcherContext) {
             }
         }
 
-        if current_index >= tree_size {
+        if current_index >= read_to {
             sleep(poll_interval).await;
         }
     }
@@ -1931,6 +1972,40 @@ pub async fn run_static_ct_watcher(log: CtLog, ctx: WatcherContext) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_partial_tile_is_held_back_until_it_fills_or_the_wait_ends() {
+        use std::time::Instant;
+        let wait = Duration::from_secs(60);
+        let t0 = Instant::now();
+        let mut since = None;
+
+        // Tile 3 holds 40 entries: read the three full tiles and wait.
+        assert_eq!(partial_tile_read_to(808, wait, &mut since, t0), 768);
+        let t30 = t0 + Duration::from_secs(30);
+        assert_eq!(partial_tile_read_to(850, wait, &mut since, t30), 768);
+
+        // The wait ends: the partial tile is read, and a new wait begins.
+        let t60 = t0 + Duration::from_secs(60);
+        assert_eq!(partial_tile_read_to(870, wait, &mut since, t60), 870);
+        let t61 = t0 + Duration::from_secs(61);
+        assert_eq!(partial_tile_read_to(871, wait, &mut since, t61), 768);
+
+        // A full tile is read at once, and the next partial one waits afresh.
+        let t62 = t0 + Duration::from_secs(62);
+        assert_eq!(partial_tile_read_to(1024, wait, &mut since, t62), 1024);
+        assert_eq!(partial_tile_read_to(1030, wait, &mut since, t62), 1024);
+        assert_eq!(partial_tile_read_to(1031, wait, &mut since, t0 + Duration::from_secs(121)), 1024);
+        assert_eq!(partial_tile_read_to(1031, wait, &mut since, t0 + Duration::from_secs(123)), 1031);
+    }
+
+    #[test]
+    fn a_zero_wait_reads_partial_tiles_at_once() {
+        let mut since = None;
+        let now = std::time::Instant::now();
+        assert_eq!(partial_tile_read_to(808, Duration::ZERO, &mut since, now), 808);
+        assert!(since.is_none());
+    }
 
     #[test]
     fn test_tail_start_seeds_overlap_behind_head() {

@@ -236,28 +236,41 @@ pub(crate) fn note_success(limiter: &Option<OperatorRateLimiter>) {
 pub(crate) const HEAD_REFRESH_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Wait before a caught-up watcher asks for the head again: the poll interval,
-/// doubled for each poll that found the head unmoved, up to four times.
+/// doubled for each poll that found the head unmoved, up to `ceiling`.
 pub(crate) fn idle_poll_delay(
     poll_interval: std::time::Duration,
     unchanged_polls: u32,
+    ceiling: std::time::Duration,
 ) -> std::time::Duration {
-    poll_interval * (1 << unchanged_polls.min(2))
+    (poll_interval * (1 << unchanged_polls.min(10))).min(ceiling.max(poll_interval))
 }
+
+/// Idle polling of a static-CT checkpoint slows to this, and no further.
+pub(crate) const STATIC_CT_IDLE_CEILING: std::time::Duration = std::time::Duration::from_secs(15);
 
 #[cfg(test)]
 mod idle_poll_tests {
     use super::idle_poll_delay;
     use std::time::Duration;
 
+    fn delays(base: u64, ceiling: u64) -> Vec<u64> {
+        (0..7)
+            .map(|n| {
+                idle_poll_delay(Duration::from_millis(base), n, Duration::from_millis(ceiling))
+                    .as_millis() as u64
+            })
+            .collect()
+    }
+
     #[test]
-    fn delay_doubles_per_unchanged_poll_up_to_four_times() {
-        let base = Duration::from_millis(1000);
-        let delays: Vec<_> = (0..6).map(|n| idle_poll_delay(base, n)).collect();
-        let expected: Vec<_> = [1000, 2000, 4000, 4000, 4000, 4000]
-            .into_iter()
-            .map(Duration::from_millis)
-            .collect();
-        assert_eq!(delays, expected);
+    fn delay_doubles_per_unchanged_poll_up_to_the_ceiling() {
+        assert_eq!(delays(1000, 4000), [1000, 2000, 4000, 4000, 4000, 4000, 4000]);
+        assert_eq!(delays(1000, 15_000), [1000, 2000, 4000, 8000, 15_000, 15_000, 15_000]);
+    }
+
+    #[test]
+    fn a_poll_interval_above_the_ceiling_is_never_shortened() {
+        assert_eq!(delays(20_000, 15_000), [20_000; 7]);
     }
 }
 

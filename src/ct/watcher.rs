@@ -587,7 +587,7 @@ pub async fn run_watcher_with_cache(log: CtLog, ctx: WatcherContext) {
             if json_buf.capacity() > JSON_BUF_RETAIN_MAX {
                 json_buf = Vec::new();
             }
-            sleep(super::idle_poll_delay(poll_interval, unchanged_polls)).await;
+            sleep(super::idle_poll_delay(poll_interval, unchanged_polls, poll_interval * 4)).await;
             unchanged_polls = unchanged_polls.saturating_add(1);
             continue;
         }

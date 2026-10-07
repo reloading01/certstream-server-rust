@@ -54,6 +54,13 @@ ct_log:
   # size, so the sustained request rate still honours the operator rate
   # limit. 1 = sequential. (env: CERTSTREAM_CT_LOG_FETCH_CONCURRENCY)
   fetch_concurrency: 4
+  # A caught-up static-CT watcher does not fetch the newest, partial tile until
+  # it is full or has stayed partial this long (seconds, 0-600). A full tile is
+  # fetched once and cached by the operator; every width of a partial tile is
+  # a new, uncached request. The last 0-255 entries arrive up to this long
+  # later (plus one idle poll, at most 15 s). 0 fetches partial tiles at once.
+  # (env: CERTSTREAM_CT_LOG_PARTIAL_TILE_WAIT_SECS)
+  partial_tile_wait_secs: 60
   # Fresh static-CT watchers start this many leaves behind the checkpoint head.
   # Default preserves the existing head-256 behavior while avoiding full-history replay.
   start_overlap_leaves: 256
