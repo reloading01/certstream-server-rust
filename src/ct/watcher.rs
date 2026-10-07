@@ -558,16 +558,15 @@ pub async fn run_watcher_with_cache(log: CtLog, ctx: WatcherContext) {
             }
         };
 
-        // RFC6962 rollback guard (parity with static_ct). Logged at debug —
-        // some replicas flap between adjacent tree_size values, and the
-        // certstream_rfc6962_tree_size_rollbacks metric already tracks each
-        // occurrence for alerting.
+        // Replicas behind a load balancer serve heads of different ages, so a
+        // smaller tree_size is routine. Entries below it are published, so read
+        // up to it; the high water mark only rises, and it costs the log nothing.
         if tree_size < high_water_tree_size {
             debug!(
                 log = %log.description,
                 got = tree_size,
                 high_water = high_water_tree_size,
-                "tree_size went backwards; refusing to advance"
+                "tree_size went backwards; reading up to the older head"
             );
             metrics::counter!(
                 "certstream_rfc6962_tree_size_rollbacks",
@@ -575,11 +574,8 @@ pub async fn run_watcher_with_cache(log: CtLog, ctx: WatcherContext) {
                 "source_id" => source_id.clone()
             )
             .increment(1);
-            health.record_failure(config.unhealthy_threshold);
-            sleep(health.get_backoff()).await;
-            continue;
         }
-        high_water_tree_size = tree_size;
+        high_water_tree_size = high_water_tree_size.max(tree_size);
         let head_polled = std::time::Instant::now();
 
         if current_index >= tree_size {
