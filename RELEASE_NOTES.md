@@ -38,6 +38,10 @@ The TLS certificate and key files are checked every 60 seconds and reloaded when
 
 Images are also published to Docker Hub, with the repository description taken from the README.
 
+### Idle polling
+
+A caught-up watcher asked for the checkpoint, or the RFC 6962 tree head, once per `poll_interval_ms` whether or not the log had grown. The delay now doubles for each poll that finds the head unmoved, up to four times the interval, and returns to the interval as soon as the head moves. In one operator's client statistics checkpoint requests were 92% of this project's requests, and on one install 18 of 38 static-CT logs were idle. The drop in requests was not measured.
+
 ## v1.6.1: Shutdown, catalog refresh and verification fixes
 
 **Release date:** October 4, 2026
