@@ -44,6 +44,40 @@ const CIRCUIT_CLOSED: u8 = 0;
 const CIRCUIT_OPEN: u8 = 1;
 const CIRCUIT_HALF_OPEN: u8 = 2;
 
+/// Full responses in a row before the get-entries window is grown by a
+/// quarter; growing rebuilds the pipeline, so it is not done on every response.
+const GROW_AFTER_FULL: u32 = 16;
+
+/// Follows what the server serves per get-entries call. A short response sets
+/// the window to what was served; a run of full ones grows it. Returns whether
+/// the pipeline must be rebuilt, because its prefetched windows were sized for
+/// the old window.
+fn adapt_window(
+    window: &mut u64,
+    full_streak: &mut u32,
+    served: u64,
+    requested: u64,
+    max_window: u64,
+    more_to_read: bool,
+) -> bool {
+    if served < requested {
+        *full_streak = 0;
+        if more_to_read {
+            *window = served.max(1);
+        }
+        return true;
+    }
+    if *window < max_window {
+        *full_streak += 1;
+        if *full_streak >= GROW_AFTER_FULL {
+            *full_streak = 0;
+            *window = (*window + *window / 4 + 1).min(max_window);
+            return true;
+        }
+    }
+    false
+}
+
 pub struct LogHealth {
     inner: parking_lot::Mutex<LogHealthInner>,
     /// Mirrors `inner.circuit`; written under the inner lock, read atomically.
@@ -312,9 +346,9 @@ pub async fn run_watcher_with_cache(log: CtLog, ctx: WatcherContext) {
     let timeout = Duration::from_secs(config.request_timeout_secs);
     let fetch_concurrency = config.fetch_concurrency.max(1) as usize;
     // Entries requested per get-entries call. Starts at the configured batch
-    // size; shrinks to the server's observed page size when it clamps (so the
-    // pipelined windows stay aligned) and probes back up on full responses.
+    // size; follows the server's page size (see `adapt_window`).
     let mut effective_batch: u64 = config.batch_size.max(1);
+    let mut full_streak: u32 = 0;
 
     // Per-watcher reusable JSON parse buffer. A fresh `to_vec()` per
     // get-entries response is a multi-hundred-KB allocation per poll; reusing
@@ -525,6 +559,7 @@ pub async fn run_watcher_with_cache(log: CtLog, ctx: WatcherContext) {
             continue;
         }
         high_water_tree_size = tree_size;
+        let head_polled = std::time::Instant::now();
 
         if current_index >= tree_size {
             // Caught up — idle point. If the last catch-up left a burst-sized
@@ -868,25 +903,28 @@ pub async fn run_watcher_with_cache(log: CtLog, ctx: WatcherContext) {
                         current_index = max_index_seen + 1;
 
                         let requested = end - batch_start + 1;
-                        if (count as u64) < requested {
-                            if current_index < tree_size {
-                                // Server clamps below our window — adopt its
-                                // page size and rebuild the pipeline from the
-                                // true index (the prefetched windows ahead of
-                                // us assumed full responses and are stale).
-                                effective_batch = (count as u64).max(1);
+                        let served = count as u64;
+                        let before = effective_batch;
+                        if adapt_window(
+                            &mut effective_batch,
+                            &mut full_streak,
+                            served,
+                            requested,
+                            config.batch_size,
+                            current_index < tree_size,
+                        ) {
+                            if served < requested && effective_batch != before {
                                 debug!(
                                     log = %log_name,
-                                    served = count,
+                                    served,
                                     requested,
                                     "short get-entries response; realigning fetch window"
                                 );
                             }
                             break;
-                        } else if effective_batch < config.batch_size {
-                            // Server kept up with the current window — probe
-                            // a larger page again on the next pipeline build.
-                            effective_batch = (effective_batch * 2).min(config.batch_size);
+                        }
+                        if head_polled.elapsed() >= super::HEAD_REFRESH_EVERY {
+                            break 'drain;
                         }
                     }
                     Err(ref e) => {
@@ -904,6 +942,45 @@ pub async fn run_watcher_with_cache(log: CtLog, ctx: WatcherContext) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn window_follows_a_short_response_and_rebuilds() {
+        let (mut window, mut streak) = (1024, 5);
+        assert!(adapt_window(&mut window, &mut streak, 160, 1024, 1024, true));
+        assert_eq!((window, streak), (160, 0));
+    }
+
+    #[test]
+    fn window_is_kept_when_a_short_response_ends_the_log() {
+        let (mut window, mut streak) = (160, 0);
+        assert!(adapt_window(&mut window, &mut streak, 40, 160, 1024, false));
+        assert_eq!(window, 160);
+    }
+
+    #[test]
+    fn window_grows_after_a_run_of_full_responses() {
+        let (mut window, mut streak) = (4, 0);
+        for _ in 0..GROW_AFTER_FULL - 1 {
+            assert!(!adapt_window(&mut window, &mut streak, 4, 4, 1024, true));
+        }
+        assert!(adapt_window(&mut window, &mut streak, 4, 4, 1024, true));
+        assert_eq!((window, streak), (6, 0));
+    }
+
+    #[test]
+    fn window_recovers_from_a_tiny_page_up_to_the_configured_size() {
+        let (mut window, mut streak) = (4, 0);
+        let mut rebuilds = 0;
+        while window < 1024 {
+            let asked = window;
+            if adapt_window(&mut window, &mut streak, asked, asked, 1024, true) {
+                rebuilds += 1;
+            }
+        }
+        assert_eq!(window, 1024);
+        assert!(rebuilds < 40, "{rebuilds} rebuilds");
+        assert!(!adapt_window(&mut window, &mut streak, 1024, 1024, 1024, true));
+    }
 
     #[test]
     fn test_log_health_initial_state() {

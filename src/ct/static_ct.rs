@@ -1328,6 +1328,7 @@ pub async fn run_static_ct_watcher(log: CtLog, ctx: WatcherContext) {
         }
         high_water_tree_size = raw_tree_size;
         let tree_size = raw_tree_size;
+        let head_polled = std::time::Instant::now();
 
         if current_index >= tree_size {
             // Keep the tracker current even when fully caught up so that /api/logs
@@ -1520,6 +1521,9 @@ pub async fn run_static_ct_watcher(log: CtLog, ctx: WatcherContext) {
                         tree_size,
                         health.total_errors(),
                     );
+                    if head_polled.elapsed() >= super::HEAD_REFRESH_EVERY {
+                        break 'tile_loop;
+                    }
                     continue;
                 }
 
@@ -1915,6 +1919,10 @@ pub async fn run_static_ct_watcher(log: CtLog, ctx: WatcherContext) {
                 current_index = ((tile_index + 1) * 256).min(tree_size);
 
                 debug!(log = %log.description, tile = tile_index, leaves = leaf_count, "processed static CT tile");
+
+                if head_polled.elapsed() >= super::HEAD_REFRESH_EVERY {
+                    break 'tile_loop;
+                }
             }
         }
 

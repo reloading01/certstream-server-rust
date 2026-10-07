@@ -231,6 +231,10 @@ pub(crate) fn note_success(limiter: &Option<OperatorRateLimiter>) {
     }
 }
 
+/// How often a long drain stops to ask the log for its head again, so lag and
+/// the amount left to read are measured against the current tree size.
+pub(crate) const HEAD_REFRESH_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// Wait before a caught-up watcher asks for the head again: the poll interval,
 /// doubled for each poll that found the head unmoved, up to four times.
 pub(crate) fn idle_poll_delay(
