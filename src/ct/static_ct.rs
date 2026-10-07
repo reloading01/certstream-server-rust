@@ -953,6 +953,7 @@ pub async fn run_static_ct_watcher(log: CtLog, ctx: WatcherContext) {
     // issuer DERs many times over.
     let issuer_cache: Arc<IssuerCache> = shared_issuer_cache;
     let poll_interval = Duration::from_millis(config.poll_interval_ms);
+    let mut unchanged_polls: u32 = 0;
     let timeout = Duration::from_secs(config.request_timeout_secs);
     let fetch_concurrency = config.fetch_concurrency.max(1) as usize;
 
@@ -1338,9 +1339,11 @@ pub async fn run_static_ct_watcher(log: CtLog, ctx: WatcherContext) {
                 tree_size,
                 health.total_errors(),
             );
-            sleep(poll_interval).await;
+            sleep(super::idle_poll_delay(poll_interval, unchanged_polls)).await;
+            unchanged_polls = unchanged_polls.saturating_add(1);
             continue;
         }
+        unchanged_polls = 0;
 
         // Inner drain: fetch all available tiles before re-polling the
         // checkpoint, pipelined `fetch_concurrency`-deep (each fetch still

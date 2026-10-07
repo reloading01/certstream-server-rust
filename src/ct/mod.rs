@@ -231,6 +231,32 @@ pub(crate) fn note_success(limiter: &Option<OperatorRateLimiter>) {
     }
 }
 
+/// Wait before a caught-up watcher asks for the head again: the poll interval,
+/// doubled for each poll that found the head unmoved, up to four times.
+pub(crate) fn idle_poll_delay(
+    poll_interval: std::time::Duration,
+    unchanged_polls: u32,
+) -> std::time::Duration {
+    poll_interval * (1 << unchanged_polls.min(2))
+}
+
+#[cfg(test)]
+mod idle_poll_tests {
+    use super::idle_poll_delay;
+    use std::time::Duration;
+
+    #[test]
+    fn delay_doubles_per_unchanged_poll_up_to_four_times() {
+        let base = Duration::from_millis(1000);
+        let delays: Vec<_> = (0..6).map(|n| idle_poll_delay(base, n)).collect();
+        let expected: Vec<_> = [1000, 2000, 4000, 4000, 4000, 4000]
+            .into_iter()
+            .map(Duration::from_millis)
+            .collect();
+        assert_eq!(delays, expected);
+    }
+}
+
 /// Outcome of one pipelined get-entries/tile fetch. The body is downloaded
 /// inside the concurrent stage so network transfer overlaps across the
 /// `buffered(fetch_concurrency)` window; the sequential processing stage only

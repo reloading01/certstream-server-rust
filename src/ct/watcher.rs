@@ -308,6 +308,7 @@ pub async fn run_watcher_with_cache(log: CtLog, ctx: WatcherContext) {
 
     let health = Arc::new(LogHealth::new());
     let poll_interval = Duration::from_millis(config.poll_interval_ms);
+    let mut unchanged_polls: u32 = 0;
     let timeout = Duration::from_secs(config.request_timeout_secs);
     let fetch_concurrency = config.fetch_concurrency.max(1) as usize;
     // Entries requested per get-entries call. Starts at the configured batch
@@ -536,9 +537,11 @@ pub async fn run_watcher_with_cache(log: CtLog, ctx: WatcherContext) {
             if json_buf.capacity() > JSON_BUF_RETAIN_MAX {
                 json_buf = Vec::new();
             }
-            sleep(poll_interval).await;
+            sleep(super::idle_poll_delay(poll_interval, unchanged_polls)).await;
+            unchanged_polls = unchanged_polls.saturating_add(1);
             continue;
         }
+        unchanged_polls = 0;
 
         // Drain every batch available under this STH before re-polling
         // get-sth — mirrors the static-CT tile loop. Fetches are pipelined
