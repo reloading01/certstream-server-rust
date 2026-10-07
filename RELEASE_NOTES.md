@@ -1,5 +1,54 @@
 # Release Notes
 
+## v1.6.3: Catch-up speed and bounded delay
+
+Logs that fell hours behind in v1.6.2 were behind because of how the watcher asked for entries, not because of the operators' limits. Every number below comes from 30 to 60 second runs against the live logs from a seeded position, one log operator at a time, compared with the v1.6.2 binary.
+
+### get-entries pages
+
+Sectigo, DigiCert and Cloudflare never serve a get-entries page across a multiple of 256, Google and TrustAsia across a multiple of 32, so a request that starts mid-page gets only the rest of it: 256 minus the index modulo 256 entries for the first three. The window followed those short tails down to 4 to 18 entries per request and climbed back a quarter at a time until the next tail. The watcher now learns the boundary from two short responses that stop on a multiple of 32 or more and ends each request on it, so every response is a full page and the fetch pipeline is no longer rebuilt.
+
+| Log | Produced entries/s | Read before | Read after | Average page before, after |
+| --- | --- | --- | --- | --- |
+| Sectigo Elephant2027h1, Tiger2027h1 | 111, 109 | 79, 181 | 4,633, 5,009 | 9 and 8, 256 |
+| DigiCert Wyvern2027h1, sphinx2027h1 | 54, 51 | 30, 9 | 113, 105 | 61 and 20, 250 |
+| Cloudflare Nimbus2026 | 20 | 43 | 827 | 12, 256 |
+| TrustAsia HETU2027, log2026a (RFC 6962) | 80, 72 | 0, 3 | 470, 261 | 1 to 3, 32 |
+| Google Argon2027h1 | 156 | 52 | 114 | 12, 32 |
+
+Produced is the growth of each log's tree size over 53 minutes, sampled from `get-sth`; over a minute it is steppier, because logs publish a new head every so often. Read is entries per second over a 30 to 60 s run started 40,000 to 300,000 entries behind, two logs of one operator at a time. TrustAsia's get-entries answered 429 to the stream of tiny requests the old window produced, so HETU2027 read nothing; with full pages it did not, and the hybrid `tree_size_source: get_sth` configuration was not needed to keep up in a 60 s run.
+
+### Rate limits no longer idle a watcher
+
+Five 429 answers in a row marked a log unhealthy and opened its circuit: the watcher then slept 60 s, again before the health probe, and needed a second success to count as healthy. In the v1.6.2 container logs TrustAsia HETU2027 logged "health check passed, resuming" 45 times in 39 minutes. A 429 now only sets the backoff, the `Retry-After` value or 5 s without one, and counts in the error total. Against a local fake log that answered 429 with `Retry-After: 0` for its first 12 s, a 40 s run read 0 entries before (circuit still open) and 56,152 after.
+
+### Polling
+
+An RFC 6962 watcher that caught up went straight back to the log for the head: DigiCert signs a fresh tree head for every request, so every round trip found a few new entries. It now waits one poll interval after catching up. Two DigiCert logs already caught up, 40 s: 233 requests and 2 429s before, 101 requests and none after, at the same lag of 0.
+
+A caught-up static-CT watcher no longer fetches the newest partial tile at once. `ct_log.partial_tile_wait_secs` (default 60, `0` restores the old behaviour, `CERTSTREAM_CT_LOG_PARTIAL_TILE_WAIT_SECS`) holds it back until it is full or has stayed partial that long. Idle checkpoint polling now backs off from `poll_interval_ms` to 15 s (it was 4 s), and returns to the interval when a poll finds a tile to read. The last 0 to 255 entries of a slow log are delivered up to the wait plus one idle poll later. Sixteen Geomys and Let's Encrypt logs, 60 s from a fresh start: 1,007 requests before, 597 after, tiles fetched 365 and 102. That run is shorter than the wait, so it shows the saving while the first partial tiles are held, not a steady-state rate.
+
+### Bounded delay (opt-in)
+
+`ct_log.max_catchup_lag_entries` and `ct_log.max_catchup_lag_secs` (`CERTSTREAM_CT_LOG_MAX_CATCHUP_LAG_ENTRIES`, `CERTSTREAM_CT_LOG_MAX_CATCHUP_LAG_SECS`) are off by default, which reads every entry however long it takes. When set, a watcher further behind than either limit at a head refresh, which happens at least every 30 s, resumes where a fresh watcher would start, logs the range and adds its size to `certstream_ct_log_skipped_entries_total`. The seconds limit is the age of the newest entry read, so it includes the age of the log's own tree head: 8 to 230 s for the RFC 6962 logs sampled, and 34 minutes for Cloudflare Nimbus2026 at one sample. Minimums are 10,000 entries and 300 s. A log that was offline for longer than the limit skips the gap on restart.
+
+With `nats.enabled` the skipped range is settled in the acknowledged position as one range. The saved position stays below records that were read before the jump and are not stored yet, and moves over the range once they are; nothing in it is published. A restart before that re-reads the range and the same limit makes the watcher jump again.
+
+In a run against a local fake log 3,000,000 entries behind with a limit of 100,000 entries, the watcher skipped 2,999,143 entries in its first poll. Sectigo Elephant2027h1 300,000 entries behind with the 300 s limit read 210,706 entries in 50 s, skipped 89,294 at the 30 s refresh and ended at lag 0.
+
+### Recommended settings
+
+- `ct_log.max_catchup_lag_secs: 900` for a hard bound of about 15 minutes plus the age of each log's tree head. The entries limit does not scale across logs that grow from 15 to 400 entries per second.
+- `ct_log.force_http1_operators: [digicert]`. DigiCert answered 429 to a single HTTP/2 connection above about 2 to 3 requests per second (12 of 12 requests succeeded at 2 per second, 6 of 20 failed at 5). Two logs 120,000 entries behind, 40 s: 218 entries/s over HTTP/2, 1,310 over HTTP/1.1.
+- `ct_log.fetch_concurrency: 12` for Google. Argon2027h1 serves 32 entries per request at about a second each, so 4 requests in flight read 114 entries/s against 156 produced; 12 read 256 (8 was not measured). The operator limiter still bounds the request rate, and caught-up logs keep one request in flight.
+- No per-operator interval is needed for Sectigo any more: at 256 entries per request its roughly 400 entries per second need under 2 requests per second.
+
+### Not fixed
+
+- A watcher reads only up to the log's latest tree head, so its delay never falls below the head's age. Sectigo, Cloudflare, TrustAsia and Google heads were 8 to 230 s old when sampled. Cloudflare Nimbus2026 had a head 34 minutes old at one sample and the tree size of Nimbus2027 did not change over 40 minutes. That is why such logs show tens of minutes of delay in `certstream_ct_log_ingest_delay_seconds` while their entries are read as they are published. The logs serve entries past the head (49 past Elephant2027h1's, 23 past log2026a's), but those are not covered by a signed tree size.
+- TrustAsia static-CT and hybrid tiles that miss the cache can take about 20 s each, which caps a watcher at about 50 entries/s with the default `fetch_concurrency` (45 entries/s measured on Luoshu2027); the README reports 276 across three logs at 16.
+- Each head refresh, every 30 s, tears the fetch pipeline down: at most three requests in flight are discarded, and the next fills after one round trip, which should cost a log with 1.7 s answers (DigiCert) about 6% of its throughput. This is arithmetic, not a measurement.
+
 ## v1.6.2: TLS fix, memory and catch-up speed
 
 **Release date:** October 5, 2026
