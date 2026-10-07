@@ -1,5 +1,19 @@
 # Release Notes
 
+## v1.6.4: Older tree heads and operator intervals from the environment
+
+**Release date:** October 7, 2026
+
+### Older tree heads
+
+An RFC 6962 watcher that read a smaller `tree_size` than the highest it had seen counted a health failure and slept without reading. Replicas behind a load balancer serve heads of different ages, so this is routine for some logs. On the production container Cloudflare Nimbus2027 logged 28 such rollbacks in about 45 minutes and "health check passed, resuming" every 62 seconds, and its lag and delay gauges did not move for 25 minutes. The watcher now reads up to the smaller head, which only covers entries the log has published, and keeps the highest head seen as its high water mark. `certstream_rfc6962_tree_size_rollbacks` still counts each occurrence and a rollback no longer touches the log's health. The static-CT watcher already behaved this way for `get-sth`.
+
+### Operator intervals from the environment
+
+`CERTSTREAM_CT_LOG_OPERATOR_RATE_LIMITS` takes `operator=milliseconds` pairs, for example `trustasia=10,digicert=40`, and replaces `ct_log.operator_rate_limits` the way the other list overrides do. It exists because a container configured only through environment variables could not set a per-operator interval. An entry without a positive number is ignored.
+
+TrustAsia log2026b serves 32 entries per request, and against the live log from 500,000 entries behind it was read at 498 entries/s with `fetch_concurrency` 4 and 615 with 16, both at the default 25 ms interval. Cloudflare answers about 100 requests in a row, then 429 with `Retry-After: 60`, which is about 380 entries/s sustained at 256 entries per request.
+
 ## v1.6.3: Catch-up speed and bounded delay
 
 **Release date:** October 7, 2026
