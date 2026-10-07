@@ -61,6 +61,20 @@ ct_log:
   # later (plus one idle poll, at most 15 s). 0 fetches partial tiles at once.
   # (env: CERTSTREAM_CT_LOG_PARTIAL_TILE_WAIT_SECS)
   partial_tile_wait_secs: 60
+  # Bound on how far a watcher may stay behind its log. At a head refresh (at
+  # least every 30 s) a watcher further behind than either limit skips ahead to
+  # near the head, logs how many entries it skipped, and counts them in
+  # certstream_ct_log_skipped_entries_total. Both are off (0) by default, which
+  # reads every entry however long it takes. Minimums: 10000 entries, 300 s.
+  # The seconds limit is the age of the newest entry read, so it includes the
+  # age of the log's own tree head (one to two minutes for most RFC 6962 logs).
+  # A log that was offline for longer than the limit skips the gap on restart.
+  # With nats.enabled the skipped range is settled in the acknowledged
+  # position, which moves over it once the records read before the jump are
+  # stored; nothing in the range is published.
+  # (env: CERTSTREAM_CT_LOG_MAX_CATCHUP_LAG_ENTRIES / _SECS)
+  max_catchup_lag_entries: 0
+  max_catchup_lag_secs: 0
   # Fresh static-CT watchers start this many leaves behind the checkpoint head.
   # Default preserves the existing head-256 behavior while avoiding full-history replay.
   start_overlap_leaves: 256

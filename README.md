@@ -220,6 +220,8 @@ rate_limit:
 | `CERTSTREAM_CT_LOG_BATCH_SIZE` | `1024` | Requested entries per `get-entries` call; servers may clamp it |
 | `CERTSTREAM_CT_LOG_FETCH_CONCURRENCY` | `4` | Concurrent range/tile fetches per watcher during catch-up, 1-16 |
 | `CERTSTREAM_CT_LOG_PARTIAL_TILE_WAIT_SECS` | `60` | Seconds a caught-up static-CT watcher waits for the newest partial tile to fill before fetching it; `0` fetches at once |
+| `CERTSTREAM_CT_LOG_MAX_CATCHUP_LAG_ENTRIES` | `0` | A watcher more than this many entries behind its log skips ahead to near the head; `0` never skips, minimum 10000 |
+| `CERTSTREAM_CT_LOG_MAX_CATCHUP_LAG_SECS` | `0` | The same bound as the age of the newest entry read; `0` never skips, minimum 300 |
 | `CERTSTREAM_USER_AGENT` | `certstream-server-rust/{VERSION} (+https://github.com/reloading01/certstream-server-rust)` | User-Agent for CT log and catalog requests |
 | `CERTSTREAM_CT_LOG_FORCE_HTTP1_OPERATORS` | none | Comma-separated operators that should use HTTP/1.1 |
 

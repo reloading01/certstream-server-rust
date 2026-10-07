@@ -73,7 +73,24 @@ struct LogAcks {
     /// Acknowledged indexes at or above `contiguous`, waiting on the gap
     /// below them to close.
     ahead: std::collections::BTreeSet<u64>,
+    /// Ranges the watcher chose never to read, as start -> end (exclusive),
+    /// waiting for the prefix to reach their start.
+    skipped: std::collections::BTreeMap<u64, u64>,
     started: bool,
+}
+
+impl LogAcks {
+    fn advance(&mut self) {
+        loop {
+            if self.ahead.remove(&self.contiguous) {
+                self.contiguous += 1;
+            } else if let Some(end) = self.skipped.remove(&self.contiguous) {
+                self.contiguous = end;
+            } else {
+                break;
+            }
+        }
+    }
 }
 
 impl AckTracker {
@@ -120,9 +137,21 @@ impl AckTracker {
             return;
         }
         entry.ahead.insert(index);
-        while entry.ahead.remove(&entry.contiguous) {
-            entry.contiguous += 1;
+        entry.advance();
+    }
+
+    /// Indexes `from..to` a catch-up jump skipped, never to be published. The
+    /// prefix passes them only once everything below `from` is acknowledged.
+    pub fn record_skipped_range(&self, log_url: &Arc<str>, from: u64, to: u64) {
+        let mut logs = self.logs.lock();
+        let entry = logs.entry(Arc::clone(log_url)).or_default();
+        entry.started = true;
+
+        if to <= entry.contiguous {
+            return;
         }
+        entry.skipped.insert(from.max(entry.contiguous), to);
+        entry.advance();
     }
 
     /// The position it is safe to persist for this log.
@@ -453,6 +482,49 @@ mod tests {
         assert!(retry_delay(1) < retry_delay(4));
         assert_eq!(retry_delay(20), retry_delay(30), "must reach a ceiling");
         assert!(retry_delay(30) <= Duration::from_secs(30));
+    }
+
+    /// With everything before it acknowledged, the position moves over a skipped range at once.
+    #[test]
+    fn a_skipped_range_closes_when_nothing_is_pending_below_it() {
+        let (tracker, url) = tracker_with("https://log.example", 100);
+        for index in 100..110 {
+            tracker.record_ack(&url, index);
+        }
+
+        tracker.record_skipped_range(&url, 110, 5_000);
+        assert_eq!(tracker.acked_index("https://log.example"), Some(5_000));
+
+        tracker.record_ack(&url, 5_000);
+        assert_eq!(tracker.acked_index("https://log.example"), Some(5_001));
+    }
+
+    /// Records read before the jump may still be in flight: the position stays
+    /// below them, so a restart re-reads them, and passes the range once stored.
+    #[test]
+    fn a_skipped_range_waits_for_unacknowledged_records_below_it() {
+        let (tracker, url) = tracker_with("https://log.example", 100);
+        tracker.record_ack(&url, 100);
+        tracker.record_ack(&url, 102);
+
+        tracker.record_skipped_range(&url, 103, 5_000);
+        tracker.record_ack(&url, 5_000);
+        assert_eq!(
+            tracker.acked_index("https://log.example"),
+            Some(101),
+            "entry 101 is unacknowledged; the position must not pass it"
+        );
+
+        tracker.record_ack(&url, 101);
+        assert_eq!(tracker.acked_index("https://log.example"), Some(5_001));
+        assert_eq!(tracker.pending(), 0);
+    }
+
+    #[test]
+    fn a_skipped_range_already_behind_the_position_changes_nothing() {
+        let (tracker, url) = tracker_with("https://log.example", 100);
+        tracker.record_skipped_range(&url, 50, 100);
+        assert_eq!(tracker.acked_index("https://log.example"), Some(100));
     }
 
     /// Logs must not share a position.

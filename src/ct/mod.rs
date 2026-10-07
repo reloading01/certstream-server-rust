@@ -274,6 +274,70 @@ mod idle_poll_tests {
     }
 }
 
+/// Where to jump a watcher that is too far behind its log, if it is; 0 turns a
+/// limit off. `delay_secs` is the age of the newest entry read, if any, and a
+/// jump never moves backwards.
+pub(crate) fn catch_up_target(
+    max_entries: u64,
+    max_secs: u64,
+    current_index: u64,
+    tree_size: u64,
+    resume_at: u64,
+    delay_secs: Option<f64>,
+) -> Option<u64> {
+    let too_many = max_entries > 0 && tree_size.saturating_sub(current_index) > max_entries;
+    let too_old = max_secs > 0 && delay_secs.is_some_and(|d| d > max_secs as f64);
+    ((too_many || too_old) && resume_at > current_index).then_some(resume_at)
+}
+
+/// Report entries a watcher skipped to get back to the head of its log.
+pub(crate) fn note_skipped(log_name: &str, source_id: &str, from: u64, to: u64) {
+    tracing::warn!(
+        log = %log_name,
+        from,
+        to,
+        skipped = to - from,
+        "too far behind the log head; skipping ahead"
+    );
+    metrics::counter!(
+        "certstream_ct_log_skipped_entries_total",
+        "log" => log_name.to_string(),
+        "source_id" => source_id.to_string()
+    )
+    .increment(to - from);
+}
+
+#[cfg(test)]
+mod catch_up_tests {
+    use super::catch_up_target;
+
+    #[test]
+    fn off_by_default() {
+        assert_eq!(catch_up_target(0, 0, 0, 10_000_000, 9_999_000, Some(86_400.0)), None);
+    }
+
+    #[test]
+    fn too_many_entries_behind_jumps_to_the_resume_point() {
+        assert_eq!(catch_up_target(100_000, 0, 1_000, 500_000, 499_000, None), Some(499_000));
+        assert_eq!(catch_up_target(100_000, 0, 400_000, 500_000, 499_000, None), None);
+        assert_eq!(catch_up_target(100_000, 0, 400_000, 500_001, 499_001, None), Some(499_001));
+    }
+
+    #[test]
+    fn too_old_jumps_only_once_an_entry_has_been_read() {
+        assert_eq!(catch_up_target(0, 900, 1_000, 500_000, 499_000, Some(901.0)), Some(499_000));
+        assert_eq!(catch_up_target(0, 900, 1_000, 500_000, 499_000, Some(900.0)), None);
+        assert_eq!(catch_up_target(0, 900, 1_000, 500_000, 499_000, None), None);
+    }
+
+    #[test]
+    fn a_jump_never_moves_backwards() {
+        // Old only because the head is: 300 entries to read, nothing to skip.
+        assert_eq!(catch_up_target(0, 900, 499_700, 500_000, 499_000, Some(5_000.0)), None);
+        assert_eq!(catch_up_target(10_000, 0, 495_000, 500_000, 499_000, None), None);
+    }
+}
+
 /// Outcome of one pipelined get-entries/tile fetch. The body is downloaded
 /// inside the concurrent stage so network transfer overlaps across the
 /// `buffered(fetch_concurrency)` window; the sequential processing stage only

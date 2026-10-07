@@ -482,6 +482,38 @@ mod tests {
         cleanup_file(&path);
     }
 
+    /// After a catch-up jump the file still holds the acknowledged position,
+    /// and moves over the skipped range once the records before it are stored.
+    #[tokio::test]
+    async fn test_saved_position_follows_acks_across_a_jump() {
+        let path = temp_state_path("jump_acks");
+        cleanup_file(&path);
+        let url = "https://jump.example";
+        let manager = StateManager::new(Some(path.clone()), StateRecovery::Fresh).unwrap();
+        let acks = Arc::new(crate::nats::AckTracker::default());
+        manager.gate_saves_on_acks(Arc::clone(&acks));
+        acks.resume_at(url, 100);
+        let key: Arc<str> = Arc::from(url);
+        let saved = || -> u64 {
+            let content = fs::read_to_string(&path).unwrap();
+            let state: StateFile = serde_json::from_str(&content).unwrap();
+            state.logs[url].current_index
+        };
+
+        acks.record_ack(&key, 100);
+        acks.record_skipped_range(&key, 102, 9_000);
+        manager.update_index(url, 9_000, 9_500);
+        manager.save_if_dirty().await;
+        assert_eq!(saved(), 101, "record 101 is not stored yet");
+
+        acks.record_ack(&key, 101);
+        manager.update_index(url, 9_000, 9_500);
+        manager.save_if_dirty().await;
+        assert_eq!(saved(), 9_000);
+
+        cleanup_file(&path);
+    }
+
     #[test]
     fn test_multiple_logs_state() {
         let manager = StateManager::new(None, StateRecovery::Fresh).unwrap();

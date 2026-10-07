@@ -983,6 +983,8 @@ pub async fn run_static_ct_watcher(log: CtLog, ctx: WatcherContext) {
     let partial_tile_wait = Duration::from_secs(config.partial_tile_wait_secs);
     // Tile index and the moment this watcher started waiting for it to fill.
     let mut partial_tile_since: Option<(u64, std::time::Instant)> = None;
+    // Submission time of the newest entry read, for `max_catchup_lag_secs`.
+    let mut newest_read: Option<f64> = None;
     let timeout = Duration::from_secs(config.request_timeout_secs);
     let fetch_concurrency = config.fetch_concurrency.max(1) as usize;
 
@@ -1385,6 +1387,31 @@ pub async fn run_static_ct_watcher(log: CtLog, ctx: WatcherContext) {
             continue;
         }
         unchanged_polls = 0;
+
+        let now_secs = chrono::Utc::now().timestamp_millis() as f64 / 1000.0;
+        if let Some(target) = super::catch_up_target(
+            config.max_catchup_lag_entries,
+            config.max_catchup_lag_secs,
+            current_index,
+            tree_size,
+            tail_start(tree_size, config.start_overlap_leaves),
+            newest_read.map(|at| now_secs - at),
+        ) {
+            super::note_skipped(&log_name, &source_id, current_index, target);
+            if let Some(sink) = &nats {
+                let log_key: Arc<str> = Arc::from(base_url.as_str());
+                sink.acks.record_skipped_range(&log_key, current_index, target);
+            }
+            current_index = target;
+            state_manager.update_index(&base_url, current_index, tree_size);
+            tracker.update(
+                &base_url,
+                health.status(),
+                current_index,
+                tree_size,
+                health.total_errors(),
+            );
+        }
 
         // Inner drain: fetch all available tiles before re-polling the
         // checkpoint, pipelined `fetch_concurrency`-deep (each fetch still
@@ -1932,10 +1959,13 @@ pub async fn run_static_ct_watcher(log: CtLog, ctx: WatcherContext) {
                         tree_size,
                         job_health.total_errors(),
                     );
-                    (durable, skipped)
+                    (durable, skipped, newest_submission)
                 });
                 match join.await {
-                    Ok((durable, skipped)) => {
+                    Ok((durable, skipped, newest_submission)) => {
+                        if newest_submission > 0.0 {
+                            newest_read = Some(newest_submission);
+                        }
                         // Queued after the broadcast, awaited before the next
                         // tile: under `on_full: block` this is where ingest
                         // slows down to match durable storage.

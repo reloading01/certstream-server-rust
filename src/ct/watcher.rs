@@ -78,6 +78,10 @@ fn adapt_window(
     false
 }
 
+/// How far behind the head a watcher with no saved position starts, and where
+/// a catch-up jump resumes.
+const FRESH_START_OVERLAP: u64 = 1000;
+
 /// Shortest page boundary worth learning; a shorter run of zero bits in the
 /// index a response stopped at is as likely to be chance as a boundary.
 const MIN_PAGE_BOUNDARY: u64 = 32;
@@ -365,6 +369,8 @@ pub async fn run_watcher_with_cache(log: CtLog, ctx: WatcherContext) {
     let mut effective_batch: u64 = config.batch_size.max(1);
     let mut full_streak: u32 = 0;
     let mut boundary = PageBoundary::default();
+    // Submission time of the newest entry read, for `max_catchup_lag_secs`.
+    let mut newest_read: Option<f64> = None;
 
     // Per-watcher reusable JSON parse buffer. A fresh `to_vec()` per
     // get-entries response is a multi-hundred-KB allocation per poll; reusing
@@ -443,7 +449,7 @@ pub async fn run_watcher_with_cache(log: CtLog, ctx: WatcherContext) {
         .await
         {
             Ok(size) => {
-                let start = size.saturating_sub(1000);
+                let start = size.saturating_sub(FRESH_START_OVERLAP);
                 info!(log = %log.description, tree_size = size, starting_at = start, "starting fresh");
                 start
             }
@@ -592,6 +598,31 @@ pub async fn run_watcher_with_cache(log: CtLog, ctx: WatcherContext) {
             continue;
         }
         unchanged_polls = 0;
+
+        let now_secs = chrono::Utc::now().timestamp_millis() as f64 / 1000.0;
+        if let Some(target) = super::catch_up_target(
+            config.max_catchup_lag_entries,
+            config.max_catchup_lag_secs,
+            current_index,
+            tree_size,
+            tree_size.saturating_sub(FRESH_START_OVERLAP),
+            newest_read.map(|at| now_secs - at),
+        ) {
+            super::note_skipped(&log_name, &source_id, current_index, target);
+            if let Some(sink) = &nats {
+                let log_key: Arc<str> = Arc::from(base_url.as_str());
+                sink.acks.record_skipped_range(&log_key, current_index, target);
+            }
+            current_index = target;
+            state_manager.update_index(&base_url, current_index, tree_size);
+            tracker.update(
+                &base_url,
+                health.status(),
+                current_index,
+                tree_size,
+                health.total_errors(),
+            );
+        }
 
         // Drain every batch available under this STH before re-polling
         // get-sth — mirrors the static-CT tile loop. Fetches are pipelined
@@ -889,9 +920,9 @@ pub async fn run_watcher_with_cache(log: CtLog, ctx: WatcherContext) {
                                 tree_size,
                                 job_health.total_errors(),
                             );
-                            (max_index_seen, durable, skipped)
+                            (max_index_seen, durable, skipped, newest_submission)
                         });
-                        let (max_index_seen, durable, skipped) = match join.await {
+                        let (max_index_seen, durable, skipped, newest_submission) = match join.await {
                             Ok(v) => v,
                             // Re-raise worker panics so the supervisor's
                             // catch_unwind recovery path in main.rs still fires.
@@ -915,6 +946,9 @@ pub async fn run_watcher_with_cache(log: CtLog, ctx: WatcherContext) {
 
                         debug!(log = %log_name, count = count, "fetched entries");
                         current_index = max_index_seen + 1;
+                        if newest_submission > 0.0 {
+                            newest_read = Some(newest_submission);
+                        }
 
                         let requested = end - batch_start + 1;
                         let served = count as u64;

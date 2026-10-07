@@ -186,6 +186,20 @@ pub struct CtLogConfig {
     /// Override with `CERTSTREAM_CT_LOG_PARTIAL_TILE_WAIT_SECS`.
     #[serde(default = "default_partial_tile_wait_secs")]
     pub partial_tile_wait_secs: u64,
+    /// Bound on how far a watcher may stay behind its log's head, in entries.
+    /// A watcher further behind at a head refresh skips ahead to near the head
+    /// instead of reading the gap, and the skipped entries are counted in
+    /// `certstream_ct_log_skipped_entries_total`. `0` never skips; otherwise at
+    /// least 10,000.
+    /// Override with `CERTSTREAM_CT_LOG_MAX_CATCHUP_LAG_ENTRIES`.
+    #[serde(default)]
+    pub max_catchup_lag_entries: u64,
+    /// The same bound in seconds: the age of the newest entry the watcher has
+    /// read. It includes the age of the log's tree head (a minute or two for
+    /// most RFC 6962 logs), so the minimum is 300. `0` never skips.
+    /// Override with `CERTSTREAM_CT_LOG_MAX_CATCHUP_LAG_SECS`.
+    #[serde(default)]
+    pub max_catchup_lag_secs: u64,
     /// Number of leaves a fresh static-CT watcher starts behind the current checkpoint head.
     /// The default preserves the existing head-256 behavior while making the overlap tunable.
     #[serde(default = "default_start_overlap_leaves")]
@@ -450,6 +464,8 @@ impl Default for CtLogConfig {
             poll_interval_ms: default_poll_interval_ms(),
             fetch_concurrency: default_fetch_concurrency(),
             partial_tile_wait_secs: default_partial_tile_wait_secs(),
+            max_catchup_lag_entries: 0,
+            max_catchup_lag_secs: 0,
             start_overlap_leaves: default_start_overlap_leaves(),
             rfc6962_enabled: true,
             static_ct_enabled: true,
@@ -466,6 +482,8 @@ impl Default for CtLogConfig {
 
 pub const MAX_START_OVERLAP_LEAVES: u64 = 100_000;
 pub const MAX_PARTIAL_TILE_WAIT_SECS: u64 = 600;
+pub const MIN_CATCHUP_LAG_ENTRIES: u64 = 10_000;
+pub const MIN_CATCHUP_LAG_SECS: u64 = 300;
 
 /// Split a comma-separated env value into operator names, dropping blanks so
 /// `"digicert,"` and `"digicert, ,geomys"` behave like the obvious YAML list.
@@ -974,6 +992,14 @@ impl Config {
             ct_log.partial_tile_wait_secs,
             "CERTSTREAM_CT_LOG_PARTIAL_TILE_WAIT_SECS"
         );
+        env_override!(
+            ct_log.max_catchup_lag_entries,
+            "CERTSTREAM_CT_LOG_MAX_CATCHUP_LAG_ENTRIES"
+        );
+        env_override!(
+            ct_log.max_catchup_lag_secs,
+            "CERTSTREAM_CT_LOG_MAX_CATCHUP_LAG_SECS"
+        );
         env_override!(ct_log.start_overlap_leaves, "CERTSTREAM_CT_LOG_START_OVERLAP_LEAVES");
         env_override!(ct_log.rfc6962_enabled, "CERTSTREAM_RFC6962_ENABLED");
         env_override!(ct_log.static_ct_enabled, "CERTSTREAM_STATIC_CT_ENABLED");
@@ -1166,6 +1192,27 @@ impl Config {
             });
         }
 
+        let lag_entries = self.ct_log.max_catchup_lag_entries;
+        if lag_entries != 0 && lag_entries < MIN_CATCHUP_LAG_ENTRIES {
+            errors.push(ConfigValidationError {
+                field: "ct_log.max_catchup_lag_entries".to_string(),
+                message: format!(
+                    "Catch-up lag limit must be 0 (off) or at least {} entries",
+                    MIN_CATCHUP_LAG_ENTRIES
+                ),
+            });
+        }
+        let lag_secs = self.ct_log.max_catchup_lag_secs;
+        if lag_secs != 0 && lag_secs < MIN_CATCHUP_LAG_SECS {
+            errors.push(ConfigValidationError {
+                field: "ct_log.max_catchup_lag_secs".to_string(),
+                message: format!(
+                    "Catch-up lag limit must be 0 (off) or at least {} seconds",
+                    MIN_CATCHUP_LAG_SECS
+                ),
+            });
+        }
+
         if self.ct_log.fetch_concurrency == 0 || self.ct_log.fetch_concurrency > 16 {
             errors.push(ConfigValidationError {
                 field: "ct_log.fetch_concurrency".to_string(),
@@ -1275,6 +1322,8 @@ mod tests {
         assert_eq!(config.poll_interval_ms, 1000);
         assert_eq!(config.fetch_concurrency, 4);
         assert_eq!(config.partial_tile_wait_secs, 60);
+        assert_eq!(config.max_catchup_lag_entries, 0);
+        assert_eq!(config.max_catchup_lag_secs, 0);
         assert_eq!(config.start_overlap_leaves, 256);
         assert!(config.rfc6962_enabled);
         assert!(config.static_ct_enabled);
@@ -1702,6 +1751,25 @@ start_overlap_leaves: 1024
         assert!(errors
             .iter()
             .any(|e| e.field == "ct_log.partial_tile_wait_secs"));
+    }
+
+    #[test]
+    fn test_validate_catchup_lag_minimums() {
+        let with = |entries, secs| Config {
+            ct_log: CtLogConfig {
+                max_catchup_lag_entries: entries,
+                max_catchup_lag_secs: secs,
+                ..CtLogConfig::default()
+            },
+            ..test_config()
+        };
+        assert!(with(0, 0).validate().is_ok());
+        assert!(with(MIN_CATCHUP_LAG_ENTRIES, MIN_CATCHUP_LAG_SECS).validate().is_ok());
+        let errors = with(MIN_CATCHUP_LAG_ENTRIES - 1, MIN_CATCHUP_LAG_SECS - 1)
+            .validate()
+            .unwrap_err();
+        assert!(errors.iter().any(|e| e.field == "ct_log.max_catchup_lag_entries"));
+        assert!(errors.iter().any(|e| e.field == "ct_log.max_catchup_lag_secs"));
     }
 
     #[test]
