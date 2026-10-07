@@ -205,54 +205,13 @@ impl LogHealth {
         }
     }
 
-    pub fn record_rate_limit(&self, unhealthy_threshold: u32) {
+    /// Record a 429 with the backoff from `Retry-After` (see `parse_retry_after`).
+    /// A 429 says nothing about the log's health, so it never opens the circuit.
+    pub fn record_rate_limit(&self, backoff_ms: u64) {
         let mut s = self.inner.lock();
         s.consecutive_successes = 0;
         s.total_errors = s.total_errors.saturating_add(1);
-        s.consecutive_failures = s.consecutive_failures.saturating_add(1);
-        s.current_backoff_ms = Self::RATE_LIMIT_BACKOFF_MS;
-
-        let half_threshold = (unhealthy_threshold / 2).max(1);
-        if s.consecutive_failures >= unhealthy_threshold {
-            s.status = HealthStatus::Unhealthy;
-            if s.circuit != CircuitState::Open {
-                s.circuit = CircuitState::Open;
-                s.circuit_opened_at = Some(Instant::now());
-                self.circuit_fast.store(CIRCUIT_OPEN, Ordering::Release);
-            }
-        } else if s.consecutive_failures >= half_threshold {
-            s.status = HealthStatus::Degraded;
-        }
-    }
-
-    /// Record a 429/rate-limit using the backoff duration the server gave us in
-    /// its `Retry-After` header (parsed + clamped by
-    /// [`crate::ct::normalize::parse_retry_after`]). `backoff_ms` is already
-    /// canonicalized; the caller passes `RATE_LIMIT_BACKOFF_MS` (5s) when the
-    /// header is absent or unparseable.
-    pub fn record_rate_limit_with_ms(&self, unhealthy_threshold: u32, backoff_ms: u64) {
-        if backoff_ms == Self::RATE_LIMIT_BACKOFF_MS {
-            self.record_rate_limit(unhealthy_threshold);
-            return;
-        }
-
-        let mut s = self.inner.lock();
-        s.consecutive_successes = 0;
-        s.total_errors = s.total_errors.saturating_add(1);
-        s.consecutive_failures = s.consecutive_failures.saturating_add(1);
         s.current_backoff_ms = backoff_ms;
-
-        let half_threshold = (unhealthy_threshold / 2).max(1);
-        if s.consecutive_failures >= unhealthy_threshold {
-            s.status = HealthStatus::Unhealthy;
-            if s.circuit != CircuitState::Open {
-                s.circuit = CircuitState::Open;
-                s.circuit_opened_at = Some(Instant::now());
-                self.circuit_fast.store(CIRCUIT_OPEN, Ordering::Release);
-            }
-        } else if s.consecutive_failures >= half_threshold {
-            s.status = HealthStatus::Degraded;
-        }
     }
 
     pub fn is_healthy(&self) -> bool {
@@ -558,8 +517,7 @@ pub async fn run_watcher_with_cache(log: CtLog, ctx: WatcherContext) {
                     if status.as_u16() == 429 {
                         let retry_after_ms =
                             super::normalize::parse_retry_after(resp.headers(), &log.description);
-                        health
-                            .record_rate_limit_with_ms(config.unhealthy_threshold, retry_after_ms);
+                        health.record_rate_limit(retry_after_ms);
                         super::note_rate_limited(&rate_limiter);
                         metrics::counter!(
                             "certstream_ct_log_rate_limited_total",
@@ -711,10 +669,7 @@ pub async fn run_watcher_with_cache(log: CtLog, ctx: WatcherContext) {
                     }
                     super::FetchOutcome::Http(status, retry_after) => {
                         if let Some(retry_after_ms) = retry_after {
-                            health.record_rate_limit_with_ms(
-                                config.unhealthy_threshold,
-                                retry_after_ms,
-                            );
+                            health.record_rate_limit(retry_after_ms);
                             super::note_rate_limited(&rate_limiter);
                             metrics::counter!(
                                 "certstream_ct_log_rate_limited_total",
@@ -1158,6 +1113,18 @@ mod tests {
 
         health.record_failure(6); // 3rd failure = degraded (6/2 = 3)
         assert_eq!(health.status(), HealthStatus::Degraded);
+    }
+
+    #[test]
+    fn rate_limits_set_the_backoff_but_never_open_the_circuit() {
+        let health = LogHealth::new();
+        for _ in 0..20 {
+            health.record_rate_limit(250);
+        }
+        assert!(health.is_healthy());
+        assert_eq!(health.circuit_state(), CircuitState::Closed);
+        assert_eq!(health.get_backoff(), Duration::from_millis(250));
+        assert_eq!(health.total_errors(), 20);
     }
 
     #[test]

@@ -1154,7 +1154,7 @@ pub async fn run_static_ct_watcher(log: CtLog, ctx: WatcherContext) {
             match fetch_sth_tree_size(&client, &sth_url, timeout, &log.description).await {
                 Ok(size) => full_tile_floor(size),
                 Err(SthError::RateLimited(retry_after_ms)) => {
-                    health.record_rate_limit_with_ms(config.unhealthy_threshold, retry_after_ms);
+                    health.record_rate_limit(retry_after_ms);
                     super::note_rate_limited(&rate_limiter);
                     metrics::counter!(
                         "certstream_ct_log_rate_limited_total",
@@ -1184,8 +1184,7 @@ pub async fn run_static_ct_watcher(log: CtLog, ctx: WatcherContext) {
                     if status.as_u16() == 429 {
                         let retry_after_ms =
                             super::normalize::parse_retry_after(resp.headers(), &log.description);
-                        health
-                            .record_rate_limit_with_ms(config.unhealthy_threshold, retry_after_ms);
+                        health.record_rate_limit(retry_after_ms);
                         super::note_rate_limited(&rate_limiter);
                         metrics::counter!(
                             "certstream_ct_log_rate_limited_total",
@@ -1436,10 +1435,7 @@ pub async fn run_static_ct_watcher(log: CtLog, ctx: WatcherContext) {
                             continue;
                         }
                         if let Some(retry_after_ms) = retry_after {
-                            health.record_rate_limit_with_ms(
-                                config.unhealthy_threshold,
-                                retry_after_ms,
-                            );
+                            health.record_rate_limit(retry_after_ms);
                             super::note_rate_limited(&rate_limiter);
                             metrics::counter!(
                                 "certstream_ct_log_rate_limited_total",
