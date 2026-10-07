@@ -78,6 +78,62 @@ fn adapt_window(
     false
 }
 
+/// Shortest page boundary worth learning; a shorter run of zero bits in the
+/// index a response stopped at is as likely to be chance as a boundary.
+const MIN_PAGE_BOUNDARY: u64 = 32;
+
+/// Where a log cuts get-entries pages: Sectigo, DigiCert and Cloudflare at
+/// multiples of 256, Google and TrustAsia of 32. A request that starts mid-page
+/// gets the tail only, and following tails with `adapt_window` shrinks the window.
+#[derive(Default, Clone, Copy)]
+struct PageBoundary {
+    /// Requests never cross a multiple of this; 0 until two cuts agree.
+    unit: u64,
+    /// Boundary suggested by the previous short response, not yet confirmed.
+    candidate: u64,
+}
+
+impl PageBoundary {
+    /// Whether a response was cut on a page boundary, which is no reason to
+    /// shrink the window. The unit is the largest power of two dividing every cut.
+    fn observe(
+        &mut self,
+        start: u64,
+        served: u64,
+        requested: u64,
+        max_unit: u64,
+        more_to_read: bool,
+    ) -> bool {
+        if served >= requested || !more_to_read {
+            return false;
+        }
+        let cut = start + served;
+        let unit = (cut & cut.wrapping_neg()).min(max_unit);
+        if unit < MIN_PAGE_BOUNDARY {
+            *self = Self::default();
+            return false;
+        }
+        match (self.unit, self.candidate) {
+            (0, 0) => self.candidate = unit,
+            (0, candidate) => {
+                self.unit = candidate.min(unit);
+                self.candidate = 0;
+            }
+            (known, _) => self.unit = known.min(unit),
+        }
+        true
+    }
+
+    /// Last index of the request that starts at `start`.
+    fn request_end(&self, start: u64, window: u64, last: u64) -> u64 {
+        let end = (start + window - 1).min(last);
+        match self.unit {
+            0 => end,
+            unit => end.min((start / unit + 1) * unit - 1),
+        }
+    }
+}
+
 pub struct LogHealth {
     inner: parking_lot::Mutex<LogHealthInner>,
     /// Mirrors `inner.circuit`; written under the inner lock, read atomically.
@@ -349,6 +405,7 @@ pub async fn run_watcher_with_cache(log: CtLog, ctx: WatcherContext) {
     // size; follows the server's page size (see `adapt_window`).
     let mut effective_batch: u64 = config.batch_size.max(1);
     let mut full_streak: u32 = 0;
+    let mut boundary = PageBoundary::default();
 
     // Per-watcher reusable JSON parse buffer. A fresh `to_vec()` per
     // get-entries response is a multi-hundred-KB allocation per poll; reusing
@@ -599,11 +656,13 @@ pub async fn run_watcher_with_cache(log: CtLog, ctx: WatcherContext) {
             // the processing loop detects that, shrinks `effective_batch` to
             // what the server actually serves, and rebuilds the pipeline from
             // the true index.
+            let page = boundary;
             let mut in_flight = futures::stream::iter(
-                (0u64..)
-                    .map(move |i| drain_start + i * window)
-                    .take_while(move |s| *s <= end_inclusive)
-                    .map(move |s| (s, (s + window - 1).min(end_inclusive))),
+                std::iter::successors(Some(drain_start), move |s| {
+                    Some(page.request_end(*s, window, end_inclusive) + 1)
+                })
+                .take_while(move |s| *s <= end_inclusive)
+                .map(move |s| (s, page.request_end(s, window, end_inclusive))),
             )
             .map(|(start, end)| {
                 let client = client.clone();
@@ -905,6 +964,17 @@ pub async fn run_watcher_with_cache(log: CtLog, ctx: WatcherContext) {
                         let requested = end - batch_start + 1;
                         let served = count as u64;
                         let before = effective_batch;
+                        if boundary.observe(
+                            batch_start,
+                            served,
+                            requested,
+                            config.batch_size,
+                            current_index < tree_size,
+                        ) {
+                            effective_batch = config.batch_size.max(1);
+                            full_streak = 0;
+                            break;
+                        }
                         if adapt_window(
                             &mut effective_batch,
                             &mut full_streak,
@@ -980,6 +1050,82 @@ mod tests {
         assert_eq!(window, 1024);
         assert!(rebuilds < 40, "{rebuilds} rebuilds");
         assert!(!adapt_window(&mut window, &mut streak, 1024, 1024, 1024, true));
+    }
+
+    /// Reads `from..to` the way the drain loop does, one request at a time,
+    /// against a server whose page for a request is `serve(start, requested)`.
+    fn read_all(serve: impl Fn(u64, u64) -> u64, from: u64, to: u64) -> (u64, PageBoundary) {
+        let (mut window, mut streak, mut boundary) = (1024, 0, PageBoundary::default());
+        let (mut index, mut requests) = (from, 0);
+        while index < to {
+            let end = boundary.request_end(index, window, to - 1);
+            let requested = end - index + 1;
+            let served = serve(index, requested);
+            let more = index + served < to;
+            if boundary.observe(index, served, requested, 1024, more) {
+                (window, streak) = (1024, 0);
+            } else {
+                adapt_window(&mut window, &mut streak, served, requested, 1024, more);
+            }
+            index += served;
+            requests += 1;
+        }
+        (requests, boundary)
+    }
+
+    fn paged_at(unit: u64) -> impl Fn(u64, u64) -> u64 {
+        move |start, requested| requested.min(unit - start % unit)
+    }
+
+    #[test]
+    fn a_256_page_log_is_read_a_page_per_request_from_any_start() {
+        for from in [0, 64, 137, 255, 328_950_000] {
+            let (requests, boundary) = read_all(paged_at(256), from, from + 100_000);
+            assert_eq!(boundary.unit, 256);
+            assert!(requests <= 100_000 / 256 + 4, "{requests} requests from {from}");
+        }
+    }
+
+    #[test]
+    fn a_32_page_log_is_read_a_page_per_request() {
+        let (requests, boundary) = read_all(paged_at(32), 436_900_100, 436_900_100 + 50_000);
+        assert_eq!(boundary.unit, 32);
+        assert!(requests <= 50_000 / 32 + 4, "{requests} requests");
+    }
+
+    #[test]
+    fn a_log_with_unaligned_pages_keeps_following_the_window() {
+        let capped = |_, requested: u64| requested.min(15);
+        let (requests, boundary) = read_all(capped, 1_000_003, 1_000_003 + 30_000);
+        assert_eq!(boundary.unit, 0);
+        assert!(requests < 30_000 / 15 + 100, "{requests} requests");
+    }
+
+    #[test]
+    fn a_short_response_that_ends_the_log_teaches_nothing() {
+        let mut boundary = PageBoundary::default();
+        assert!(!boundary.observe(0, 64, 1024, 1024, false));
+        assert_eq!((boundary.unit, boundary.candidate), (0, 0));
+    }
+
+    #[test]
+    fn a_cut_off_the_boundary_forgets_what_was_learned() {
+        let mut boundary = PageBoundary::default();
+        assert!(boundary.observe(0, 256, 1024, 1024, true));
+        assert!(boundary.observe(256, 256, 1024, 1024, true));
+        assert_eq!(boundary.unit, 256);
+        assert!(!boundary.observe(512, 15, 256, 1024, true));
+        assert_eq!((boundary.unit, boundary.candidate), (0, 0));
+    }
+
+    #[test]
+    fn requests_stop_at_the_boundary_and_at_the_head() {
+        let page = PageBoundary { unit: 256, candidate: 0 };
+        assert_eq!(page.request_end(240, 1024, 10_000), 255);
+        assert_eq!(page.request_end(256, 1024, 10_000), 511);
+        assert_eq!(page.request_end(256, 100, 10_000), 355);
+        assert_eq!(page.request_end(256, 1024, 300), 300);
+        assert_eq!(PageBoundary::default().request_end(240, 1024, 10_000), 1263);
     }
 
     #[test]
