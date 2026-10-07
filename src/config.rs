@@ -495,6 +495,19 @@ fn parse_operator_list(raw: &str) -> Vec<String> {
         .collect()
 }
 
+/// Parse `"trustasia=10,digicert=40"` into operator floors in milliseconds.
+/// An entry without a positive number is dropped.
+fn parse_operator_rate_limits(raw: &str) -> std::collections::HashMap<String, u64> {
+    parse_operator_list(raw)
+        .iter()
+        .filter_map(|pair| {
+            let (name, ms) = pair.split_once('=')?;
+            let ms: u64 = ms.trim().parse().ok().filter(|ms| *ms > 0)?;
+            Some((name.trim().to_string(), ms))
+        })
+        .collect()
+}
+
 fn default_operator_rate_limit_ms() -> u64 {
     25
 }
@@ -1011,6 +1024,9 @@ impl Config {
         if let Ok(v) = env::var("CERTSTREAM_CT_LOG_FORCE_HTTP1_OPERATORS") {
             ct_log.force_http1_operators = parse_operator_list(&v);
         }
+        if let Ok(v) = env::var("CERTSTREAM_CT_LOG_OPERATOR_RATE_LIMITS") {
+            ct_log.operator_rate_limits = parse_operator_rate_limits(&v);
+        }
         if let Ok(v) = env::var("CERTSTREAM_CT_LOG_EXCLUDED_OPERATORS") {
             ct_log.excluded_operators = parse_operator_list(&v);
         }
@@ -1377,6 +1393,15 @@ user_agent: "certstream-server-rust/1.5.3 (contact@example.com)"
             ..test_config()
         };
         assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_parse_operator_rate_limits_keeps_only_positive_numbers() {
+        let parsed = parse_operator_rate_limits("TrustAsia=10, digicert = 40,geomys=0,bad,x=y,");
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed["TrustAsia"], 10);
+        assert_eq!(parsed["digicert"], 40);
+        assert!(parse_operator_rate_limits("").is_empty());
     }
 
     #[test]

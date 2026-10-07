@@ -122,6 +122,7 @@ ct_log:
   # Watch certstream_ct_log_rate_limited_total and
   # certstream_operator_request_interval_ms.
   default_operator_rate_limit_ms: 25
+  # (env: CERTSTREAM_CT_LOG_OPERATOR_RATE_LIMITS, e.g. trustasia=10,digicert=40)
   operator_rate_limits: {}
   # User-Agent for all outbound HTTP. Some operators (e.g. Geomys) apply a
   # more generous rate limit tier to clients that include a contact email.
