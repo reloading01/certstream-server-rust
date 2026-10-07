@@ -56,6 +56,8 @@ pub struct OperatorLimiter {
     burst: f64,
     /// Operator key for the interval gauge; empty for no gauge.
     name: String,
+    /// get-entries and tile requests started for the operator.
+    requests: metrics::Counter,
     adapt: parking_lot::Mutex<Adapt>,
 }
 
@@ -102,6 +104,11 @@ impl OperatorLimiter {
             ceiling_us: ceiling.as_micros() as u64,
             interval_us: AtomicU64::new(floor_us),
             burst: burst.max(1) as f64,
+            requests: if name.is_empty() {
+                metrics::Counter::noop()
+            } else {
+                metrics::counter!("certstream_operator_requests_total", "operator" => name.clone())
+            },
             name,
             adapt: parking_lot::Mutex::new(Adapt::default()),
         }
@@ -111,6 +118,7 @@ impl OperatorLimiter {
         loop {
             let interval_us = self.interval_us.load(Ordering::Relaxed);
             if interval_us == 0 {
+                self.requests.increment(1);
                 return;
             }
             let interval = std::time::Duration::from_micros(interval_us);
@@ -124,6 +132,7 @@ impl OperatorLimiter {
                     // Deduct and return without awaiting — a caller cancelled
                     // mid-`tick` can never leak a token.
                     s.tokens -= 1.0;
+                    self.requests.increment(1);
                     return;
                 }
                 interval.mul_f64(1.0 - s.tokens)

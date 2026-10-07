@@ -43,6 +43,10 @@ In a run against a local fake log 3,000,000 entries behind with a limit of 100,0
 - `ct_log.fetch_concurrency: 12` for Google. Argon2027h1 serves 32 entries per request at about a second each, so 4 requests in flight read 114 entries/s against 156 produced; 12 read 256 (8 was not measured). The operator limiter still bounds the request rate, and caught-up logs keep one request in flight.
 - No per-operator interval is needed for Sectigo any more: at 256 entries per request its roughly 400 entries per second need under 2 requests per second.
 
+### Metrics
+
+`certstream_operator_requests_total{operator}` counts the get-entries and tile requests started for each operator, so request rates can be read from `rate()` without the operator's own statistics. Tree head and checkpoint polls are not included.
+
 ### Not fixed
 
 - A watcher reads only up to the log's latest tree head, so its delay never falls below the head's age. Sectigo, Cloudflare, TrustAsia and Google heads were 8 to 230 s old when sampled. Cloudflare Nimbus2026 had a head 34 minutes old at one sample and the tree size of Nimbus2027 did not change over 40 minutes. That is why such logs show tens of minutes of delay in `certstream_ct_log_ingest_delay_seconds` while their entries are read as they are published. The logs serve entries past the head (49 past Elephant2027h1's, 23 past log2026a's), but those are not covered by a signed tree size.
