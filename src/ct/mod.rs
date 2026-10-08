@@ -299,6 +299,18 @@ pub(crate) fn catch_up_target(
     ((too_many || too_old) && resume_at > current_index).then_some(resume_at)
 }
 
+/// Delay to hold against `max_catchup_lag_secs`: the age of the newest entry
+/// read, capped by how long the watcher has been behind. A log that publishes
+/// its head late makes every entry old before it can be read.
+pub(crate) fn catch_up_delay(
+    now_secs: f64,
+    newest_read: Option<f64>,
+    behind_since: Option<f64>,
+) -> Option<f64> {
+    let entry_age = now_secs - newest_read?;
+    Some(entry_age.min(now_secs - behind_since?))
+}
+
 /// Report entries a watcher skipped to get back to the head of its log.
 pub(crate) fn note_skipped(log_name: &str, source_id: &str, from: u64, to: u64) {
     tracing::warn!(
@@ -337,6 +349,17 @@ mod catch_up_tests {
         assert_eq!(catch_up_target(0, 900, 1_000, 500_000, 499_000, Some(901.0)), Some(499_000));
         assert_eq!(catch_up_target(0, 900, 1_000, 500_000, 499_000, Some(900.0)), None);
         assert_eq!(catch_up_target(0, 900, 1_000, 500_000, 499_000, None), None);
+    }
+
+    #[test]
+    fn a_late_head_does_not_age_the_entries_behind_it() {
+        use super::catch_up_delay;
+        // Newest entry read is 3,000 s old, but the watcher fell behind 120 s ago.
+        assert_eq!(catch_up_delay(10_000.0, Some(7_000.0), Some(9_880.0)), Some(120.0));
+        // Never caught up: the entry age is the smaller of the two.
+        assert_eq!(catch_up_delay(10_000.0, Some(9_500.0), Some(100.0)), Some(500.0));
+        assert_eq!(catch_up_delay(10_000.0, None, Some(100.0)), None);
+        assert_eq!(catch_up_delay(10_000.0, Some(9_500.0), None), None);
     }
 
     #[test]

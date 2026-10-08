@@ -985,6 +985,8 @@ pub async fn run_static_ct_watcher(log: CtLog, ctx: WatcherContext) {
     let mut partial_tile_since: Option<(u64, std::time::Instant)> = None;
     // Submission time of the newest entry read, for `max_catchup_lag_secs`.
     let mut newest_read: Option<f64> = None;
+    // When the watcher last fell behind its log's head; None while caught up.
+    let mut behind_since: Option<f64> = None;
     let timeout = Duration::from_secs(config.request_timeout_secs);
     let fetch_concurrency = config.fetch_concurrency.max(1) as usize;
 
@@ -1389,13 +1391,16 @@ pub async fn run_static_ct_watcher(log: CtLog, ctx: WatcherContext) {
         unchanged_polls = 0;
 
         let now_secs = chrono::Utc::now().timestamp_millis() as f64 / 1000.0;
+        if current_index < tree_size {
+            behind_since.get_or_insert(now_secs);
+        }
         if let Some(target) = super::catch_up_target(
             config.max_catchup_lag_entries,
             config.max_catchup_lag_secs,
             current_index,
             tree_size,
             tail_start(tree_size, config.start_overlap_leaves),
-            newest_read.map(|at| now_secs - at),
+            super::catch_up_delay(now_secs, newest_read, behind_since),
         ) {
             super::note_skipped(&log_name, &source_id, current_index, target);
             if let Some(sink) = &nats {
@@ -1994,8 +1999,7 @@ pub async fn run_static_ct_watcher(log: CtLog, ctx: WatcherContext) {
         }
 
         if current_index >= read_to {
-            // Whatever age the next head shows is the log's publishing delay.
-            newest_read = None;
+            behind_since = None;
             sleep(poll_interval).await;
         }
     }

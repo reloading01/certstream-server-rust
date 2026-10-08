@@ -371,6 +371,8 @@ pub async fn run_watcher_with_cache(log: CtLog, ctx: WatcherContext) {
     let mut boundary = PageBoundary::default();
     // Submission time of the newest entry read, for `max_catchup_lag_secs`.
     let mut newest_read: Option<f64> = None;
+    // When the watcher last fell behind its log's head; None while caught up.
+    let mut behind_since: Option<f64> = None;
 
     // Per-watcher reusable JSON parse buffer. A fresh `to_vec()` per
     // get-entries response is a multi-hundred-KB allocation per poll; reusing
@@ -596,13 +598,16 @@ pub async fn run_watcher_with_cache(log: CtLog, ctx: WatcherContext) {
         unchanged_polls = 0;
 
         let now_secs = chrono::Utc::now().timestamp_millis() as f64 / 1000.0;
+        if current_index < tree_size {
+            behind_since.get_or_insert(now_secs);
+        }
         if let Some(target) = super::catch_up_target(
             config.max_catchup_lag_entries,
             config.max_catchup_lag_secs,
             current_index,
             tree_size,
             tree_size.saturating_sub(FRESH_START_OVERLAP),
-            newest_read.map(|at| now_secs - at),
+            super::catch_up_delay(now_secs, newest_read, behind_since),
         ) {
             super::note_skipped(&log_name, &source_id, current_index, target);
             if let Some(sink) = &nats {
@@ -995,8 +1000,7 @@ pub async fn run_watcher_with_cache(log: CtLog, ctx: WatcherContext) {
         // DigiCert signs a fresh head per request, so a caught-up watcher is
         // never idle at the top of the loop; pace it like the static-CT loop.
         if current_index >= tree_size {
-            // Whatever age the next head shows is the log's publishing delay.
-            newest_read = None;
+            behind_since = None;
             sleep(poll_interval).await;
         }
     }
