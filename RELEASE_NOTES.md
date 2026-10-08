@@ -1,5 +1,11 @@
 # Release Notes
 
+## v1.6.5: Late tree heads no longer skip entries
+
+**Release date:** October 8, 2026
+
+`CERTSTREAM_CT_LOG_MAX_CATCHUP_LAG_SECS` measured the age of the newest entry read, so a watcher that had reached the head and then met a new one saw every entry between the two as older than the bound whenever the log published its head late. Cloudflare Nimbus2027 publishes one roughly every 30 to 60 minutes, and on the production container the bound skipped 12.1 million of its entries and 1.9 million of Nimbus2026's in 29 hours, about 400,000 at each new head, although they could have been read in minutes. A watcher now forgets the age once it reaches the head, so the bound only applies to one that was still behind when the next head arrived. The entry bound is unchanged.
+
 ## v1.6.4: Older tree heads and operator intervals from the environment
 
 **Release date:** October 7, 2026
