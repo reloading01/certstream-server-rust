@@ -1,5 +1,13 @@
 # Release Notes
 
+## v1.6.6: The delay bound counts time behind, not entry age
+
+**Release date:** October 9, 2026
+
+v1.6.5 dropped the entry age once a watcher reached the head, which was not enough: Cloudflare Nimbus2027 skipped 451,852 entries 6 minutes after the v1.6.5 container started, and Nimbus2026 38,304 at the next head. A head that is 30 to 60 minutes old makes every entry behind it older than `CERTSTREAM_CT_LOG_MAX_CATCHUP_LAG_SECS` before the first request, and reading the gap takes minutes more under Cloudflare's request limit. The delay held against the bound is now the age of the newest entry read, capped by the time since the watcher last fell behind its head, so a log's own publishing delay never counts. A watcher that stays behind for longer than the bound still skips, and so does one whose entries are older than the bound. The same cap applies to the static-CT watcher.
+
+On the same container DigiCert sphinx2027h1 and Wyvern2027h1 stopped skipping once `CERTSTREAM_CT_LOG_FORCE_HTTP1_OPERATORS=digicert` was set, with 10 rate-limited responses in the first 30 minutes instead of about 18,000 over the previous day.
+
 ## v1.6.5: Late tree heads no longer skip entries
 
 **Release date:** October 8, 2026
