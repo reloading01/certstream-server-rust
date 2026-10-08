@@ -1994,6 +1994,8 @@ pub async fn run_static_ct_watcher(log: CtLog, ctx: WatcherContext) {
         }
 
         if current_index >= read_to {
+            // Whatever age the next head shows is the log's publishing delay.
+            newest_read = None;
             sleep(poll_interval).await;
         }
     }
