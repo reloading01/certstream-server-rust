@@ -163,7 +163,6 @@
                     <div class="live-stat"><span class="live-label">Outbound bandwidth</span><span class="live-value" id="v-bw">-</span></div>
                     <div class="live-stat"><span class="live-label">Certificates per second</span><span class="live-value" id="v-cps">-</span></div>
                     <div class="live-stat"><span class="live-label">Data sent since restart</span><span class="live-value" id="v-sent">-</span></div>
-                    <div class="live-stat"><span class="live-label">Uptime</span><span class="live-value" id="v-up">-</span></div>
                 </div>
                 <p class="live-status" id="live-status">Loading live numbers.</p>
             </div>
@@ -343,16 +342,11 @@ certstream.listen_for_events(on_message, url="wss://api.certstream.dev/lite")</p
           while (b >= 1000 && i < units.length - 1) { b /= 1000; i++; }
           return b.toFixed(i > 2 ? 2 : 1) + ' ' + units[i];
         }
-        function fmtUptime(s) {
-          var d = Math.floor(s / 86400), h = Math.floor(s % 86400 / 3600), m = Math.floor(s % 3600 / 60);
-          return d ? d + 'd ' + h + 'h' : h ? h + 'h ' + m + 'm' : m + 'm';
-        }
 
         function render(s) {
           var t = performance.now();
           $('v-conn').textContent = num.format(s.connections.total);
           $('v-sent').textContent = fmtBytes(s.throughput.bytes_sent);
-          $('v-up').textContent = fmtUptime(s.uptime_seconds);
           if (prev && s.throughput.bytes_sent >= prev.bytes && s.throughput.certificates_processed >= prev.certs) {
             var dt = (t - prev.t) / 1000;
             var mbit = (s.throughput.bytes_sent - prev.bytes) * 8 / dt / 1e6;
