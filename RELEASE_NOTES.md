@@ -1,5 +1,36 @@
 # Release Notes
 
+## v1.7.0: WebSocket compression
+
+**Release date:** October 27, 2026
+
+**What changed:** WebSocket clients that offer `permessage-deflate` now get compressed frames on the full, lite, domains-only and v2 streams. The server compresses each message once per stream and sends the same bytes to every compressing client, so compression costs about the same CPU for one client as for a thousand.
+
+**Affected:** every install that serves WebSocket clients. Clients that do not offer the extension, and subscriptions with a `domain` or `issuer` filter, get the same uncompressed frames as before.
+
+**Upgrade:** recommended if outbound bandwidth matters to you.
+
+### Compression
+
+| Stream | Bytes per message before | After |
+| --- | --- | --- |
+| Lite | 1,567 | 282 to 288 |
+| Domains-only | 97 | 43 |
+
+Measured on live traffic. On a test server 30 lite clients went from 259.7 to 63.7 Mbit/s with no change in CPU use.
+
+The compressors restart every 128 messages. A new client starts receiving at the next restart point, and a client that falls behind and loses messages resumes at the next one; both wait at most 128 messages. Heartbeats and control frames are not compressed. The server accepts `client_max_window_bits` and `client_no_context_takeover` and declines offers that require `server_no_context_takeover` or a smaller server window, so those clients connect uncompressed.
+
+A new counter, `certstream_deflate_dispatch_lagged`, counts the times the compressing task itself fell behind the broadcast.
+
+### Upgrade
+
+No configuration or state-file changes; the upgrade is a drop-in.
+
+```bash
+docker pull ghcr.io/reloading01/certstream-server-rust:1.7.0
+```
+
 ## v1.6.7: Fix unnecessary entry skipping after catch-up
 
 **Release date:** October 12, 2026
