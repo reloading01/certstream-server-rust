@@ -44,7 +44,7 @@ sonic = ["dep:sonic-rs"]
 
 [dependencies]
 tokio = { version = "1.52", features = ["rt-multi-thread", "net", "sync", "time", "io-util", "io-std", "macros", "fs", "signal"] }
-axum = { version = "0.8", features = ["ws"] }
+axum = "0.8"
 axum-server = { version = "0.8", features = ["tls-rustls"] }
 tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.6", features = ["cors"] }
@@ -60,6 +60,11 @@ chrono = { version = "0.4", features = ["serde"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 futures-util = "0.3"
+# WebSocket upgrades are done by hand rather than through axum::extract::ws,
+# which cannot send the RSV1-flagged frames permessage-deflate needs.
+tokio-tungstenite = { version = "0.28", default-features = false, features = ["handshake"] }
+hyper = "1"
+hyper-util = { version = "0.1", features = ["tokio"] }
 metrics = "0.24"
 metrics-exporter-prometheus = "0.18"
 thiserror = "2"

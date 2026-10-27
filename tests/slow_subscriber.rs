@@ -12,12 +12,13 @@ use std::net::{SocketAddr, TcpStream};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use axum::extract::ws::Utf8Bytes;
+use tokio_tungstenite::tungstenite::Utf8Bytes;
 use axum::routing::get;
 use axum::Router;
 use certstream_server_rust::api::ServerStats;
 use certstream_server_rust::config::{ConnectionLimitConfig, StreamConfig};
 use certstream_server_rust::filter::FilterHub;
+use certstream_server_rust::deflate::DeflateHub;
 use certstream_server_rust::middleware::ConnectionLimiter;
 use certstream_server_rust::models::PreSerializedMessage;
 use certstream_server_rust::sse::handle_sse_stream;
@@ -68,6 +69,7 @@ impl Harness {
             streams: Arc::new(StreamConfig::default()),
             stats: Arc::new(ServerStats::new()),
             filters: FilterHub::new(tx.clone()),
+            deflate: DeflateHub::new(tx.clone(), 1024),
         });
 
         let app = Router::new()

@@ -282,6 +282,7 @@
                         <tr><td><code>ws://host:8080/v2</code></td><td>Version 2 output (off by default)</td></tr>
                     </tbody>
                 </table>
+                <p style="margin-top: 1rem;">Unfiltered WebSocket streams support <code>permessage-deflate</code> (RFC 7692). A client that offers it receives about 5 times less data on the lite stream, with nothing to change in its code: Python <code>websockets</code>, Node <code>ws</code> and browsers offer it by default. The stream is compressed once and shared by every compressing client, so the server's cost does not grow with them. A client starts at the next compressor reset, at most 128 messages after it connects, and after missing messages waits for the next one. Filtered streams, and clients that ask for <code>server_no_context_takeover</code> or a window below 15 bits, are sent uncompressed.</p>
                 <h3>SSE</h3>
                 <table class="endpoints-table">
                     <thead><tr><th>Endpoint</th><th>Description</th></tr></thead>

@@ -172,7 +172,7 @@
             <div class="wrap">
                 <div class="section-header">
                     <h2>Connect to the CertStream WebSocket</h2>
-                    <p>Certificates arrive as JSON text frames in the <a href="docs.html">same format as the self-hosted server</a>.</p>
+                    <p>Certificates arrive as JSON text frames in the <a href="docs.html">same format as the self-hosted server</a>. Clients that support WebSocket compression (Python <code>websockets</code>, Node <code>ws</code>, browsers) receive about 5 times less data with no code change.</p>
                 </div>
                 <table class="endpoints-table">
                     <thead><tr><th>Endpoint</th><th>Stream</th><th>Size per certificate</th></tr></thead>

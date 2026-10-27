@@ -1,11 +1,10 @@
 use axum::{
-    extract::{
-        ws::{close_code, CloseFrame, Message, Utf8Bytes, WebSocket, WebSocketUpgrade},
-        ConnectInfo, Query, State,
-    },
-    http::StatusCode,
-    response::IntoResponse,
+    extract::{ConnectInfo, Query, Request, State},
+    http::{header, HeaderMap, HeaderValue, Method, StatusCode},
+    response::{IntoResponse, Response},
 };
+use bytes::Bytes;
+use hyper_util::rt::TokioIo;
 use serde::Deserialize;
 use std::net::{IpAddr, SocketAddr};
 use futures_util::{SinkExt, StreamExt};
@@ -14,10 +13,23 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::broadcast;
 use tokio::time::{interval, timeout};
+use tokio_tungstenite::tungstenite::{
+    handshake::derive_accept_key,
+    protocol::{
+        frame::{
+            coding::{CloseCode, Data, OpCode},
+            Frame,
+        },
+        CloseFrame, Role,
+    },
+    Message, Utf8Bytes,
+};
+use tokio_tungstenite::WebSocketStream;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
 
 use crate::config::StreamConfig;
+use crate::deflate::{self, DeflateHub};
 use crate::filter::{Filter, FilterHub};
 use crate::lag_policy::LagWindow;
 use crate::middleware::{ConnectionGuard, ConnectionLimiter};
@@ -32,6 +44,8 @@ pub struct AppState {
     pub streams: Arc<StreamConfig>,
     pub stats: Arc<crate::api::ServerStats>,
     pub filters: Arc<FilterHub>,
+    /// Shared-context permessage-deflate. Dormant until a client negotiates it.
+    pub deflate: Arc<DeflateHub>,
     /// Cancelled when the server is asked to stop. Streams never finish on
     /// their own, so each one ends itself on this; otherwise graceful
     /// shutdown waits for the last client to leave.
@@ -134,65 +148,139 @@ impl ConnectionCounter {
 }
 
 pub async fn handle_full_stream(
-    ws: WebSocketUpgrade,
     Query(params): Query<FilterParams>,
     State(state): State<Arc<AppState>>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
-) -> impl IntoResponse {
-    upgrade(ws, state, addr, StreamType::Full, &params)
+    req: Request,
+) -> Response {
+    upgrade(req, state, addr, StreamType::Full, &params)
 }
 
 pub async fn handle_lite_stream(
-    ws: WebSocketUpgrade,
     Query(params): Query<FilterParams>,
     State(state): State<Arc<AppState>>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
-) -> impl IntoResponse {
-    upgrade(ws, state, addr, StreamType::Lite, &params)
+    req: Request,
+) -> Response {
+    upgrade(req, state, addr, StreamType::Lite, &params)
 }
 
 pub async fn handle_domains_only(
-    ws: WebSocketUpgrade,
     Query(params): Query<FilterParams>,
     State(state): State<Arc<AppState>>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
-) -> impl IntoResponse {
-    upgrade(ws, state, addr, StreamType::DomainsOnly, &params)
+    req: Request,
+) -> Response {
+    upgrade(req, state, addr, StreamType::DomainsOnly, &params)
 }
 
 pub async fn handle_v2_stream(
-    ws: WebSocketUpgrade,
     Query(params): Query<FilterParams>,
     State(state): State<Arc<AppState>>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
-) -> impl IntoResponse {
-    upgrade(ws, state, addr, StreamType::V2, &params)
+    req: Request,
+) -> Response {
+    upgrade(req, state, addr, StreamType::V2, &params)
+}
+
+/// Checks an HTTP/1.1 WebSocket upgrade request (RFC 6455 §4.2.1) and returns
+/// its `Sec-WebSocket-Key`.
+fn handshake_key(req: &Request) -> Result<&HeaderValue, (StatusCode, &'static str)> {
+    fn has_token(headers: &HeaderMap, name: header::HeaderName, token: &str) -> bool {
+        headers
+            .get_all(name)
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .flat_map(|v| v.split(','))
+            .any(|t| t.trim().eq_ignore_ascii_case(token))
+    }
+
+    if req.method() != Method::GET {
+        return Err((StatusCode::METHOD_NOT_ALLOWED, "WebSocket upgrade requires GET"));
+    }
+    let headers = req.headers();
+    if !has_token(headers, header::CONNECTION, "upgrade") {
+        return Err((StatusCode::BAD_REQUEST, "Connection header did not include 'upgrade'"));
+    }
+    if !has_token(headers, header::UPGRADE, "websocket") {
+        return Err((StatusCode::BAD_REQUEST, "`Upgrade` header did not include 'websocket'"));
+    }
+    if headers.get(header::SEC_WEBSOCKET_VERSION).map(HeaderValue::as_bytes) != Some(b"13") {
+        return Err((StatusCode::BAD_REQUEST, "`Sec-WebSocket-Version` header did not include '13'"));
+    }
+    if req.extensions().get::<hyper::upgrade::OnUpgrade>().is_none() {
+        return Err((StatusCode::UPGRADE_REQUIRED, "connection cannot be upgraded"));
+    }
+    headers
+        .get(header::SEC_WEBSOCKET_KEY)
+        .ok_or((StatusCode::BAD_REQUEST, "`Sec-WebSocket-Key` header missing"))
 }
 
 fn upgrade(
-    ws: WebSocketUpgrade,
+    mut req: Request,
     state: Arc<AppState>,
     addr: SocketAddr,
     stream_type: StreamType,
     params: &FilterParams,
-) -> axum::response::Response {
+) -> Response {
+    let accept = match handshake_key(&req) {
+        Ok(key) => derive_accept_key(key.as_bytes()),
+        Err(rejection) => return rejection.into_response(),
+    };
     let ip = addr.ip();
     let Some(guard) = state.limiter.acquire(ip) else {
         return (StatusCode::TOO_MANY_REQUESTS, "Connection limit exceeded").into_response();
     };
     // Before the upgrade, so a rejected filter is an HTTP error the client
     // can read rather than an immediately-closed WebSocket.
-    let (rx, filtered) = match state.subscribe_filtered(params) {
-        Ok(sub) => sub.into_receiver(),
+    let feed = match state.subscribe_filtered(params) {
+        // A filtered stream is a subset of the broadcast, so it cannot share
+        // the compressed one.
+        Ok(Subscription::Firehose(rx))
+            if deflate::negotiate(
+                req.headers()
+                    .get_all(header::SEC_WEBSOCKET_EXTENSIONS)
+                    .iter()
+                    .filter_map(|v| v.to_str().ok()),
+            ) =>
+        {
+            drop(rx);
+            Feed::Deflate {
+                seat: state.deflate.subscribe(stream_type.format()),
+                synced: false,
+            }
+        }
+        Ok(sub) => {
+            let (rx, filtered) = sub.into_receiver();
+            Feed::Raw { rx, filtered }
+        }
         Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
     };
-    // `guard` rides into the callback rather than being released at the end
-    // of `handle_socket`: axum drops this closure without calling it when the
-    // handshake fails, and that path has to give the slot back too.
-    ws.on_upgrade(move |socket| {
-        handle_socket(socket, rx, filtered, stream_type, state, ip, guard)
-    })
-    .into_response()
+    let compressed = matches!(feed, Feed::Deflate { .. });
+
+    let on_upgrade = hyper::upgrade::on(&mut req);
+    // `guard` rides into the task rather than being released at the end of
+    // `handle_socket`: when the handshake never completes the task returns
+    // early, and that path has to give the slot back too.
+    tokio::spawn(async move {
+        let Ok(upgraded) = on_upgrade.await else {
+            return;
+        };
+        let socket = WebSocketStream::from_raw_socket(TokioIo::new(upgraded), Role::Server, None).await;
+        handle_socket(socket, feed, stream_type, state, ip, guard).await;
+    });
+
+    let mut response = Response::builder()
+        .status(StatusCode::SWITCHING_PROTOCOLS)
+        .header(header::CONNECTION, "upgrade")
+        .header(header::UPGRADE, "websocket")
+        .header(header::SEC_WEBSOCKET_ACCEPT, accept);
+    if compressed {
+        response = response.header(header::SEC_WEBSOCKET_EXTENSIONS, deflate::EXTENSION_RESPONSE);
+    }
+    response
+        .body(axum::body::Body::empty())
+        .expect("static upgrade response is valid")
 }
 
 #[derive(Clone, Copy)]
@@ -203,11 +291,99 @@ enum StreamType {
     V2,
 }
 
-#[allow(clippy::too_many_arguments)]
+impl StreamType {
+    fn format(self) -> deflate::Format {
+        match self {
+            Self::Full => deflate::Format::Full,
+            Self::Lite => deflate::Format::Lite,
+            Self::DomainsOnly => deflate::Format::DomainsOnly,
+            Self::V2 => deflate::Format::V2,
+        }
+    }
+
+    fn payload(self, msg: &PreSerializedMessage) -> &Utf8Bytes {
+        match self {
+            Self::Full => &msg.full,
+            Self::Lite => &msg.lite,
+            Self::DomainsOnly => &msg.domains_only,
+            Self::V2 => &msg.v2,
+        }
+    }
+}
+
+/// Where a connection's messages come from.
+enum Feed {
+    Raw {
+        rx: broadcast::Receiver<Arc<PreSerializedMessage>>,
+        filtered: Option<crate::filter::Subscription>,
+    },
+    /// The shared compressed stream. `synced` is false until the connection
+    /// reaches a compressor reset, and again after it loses a message.
+    Deflate { seat: deflate::Seat, synced: bool },
+}
+
+/// The outcome of waiting on a [`Feed`].
+struct Step {
+    send: Option<Message>,
+    /// Messages this connection will never see.
+    lost: u64,
+    closed: bool,
+}
+
+impl Feed {
+    /// Cancel-safe: the only await is the channel receive.
+    async fn next(&mut self, stream_type: StreamType) -> Step {
+        let mut step = Step { send: None, lost: 0, closed: false };
+        match self {
+            Self::Raw { rx, filtered } => {
+                let result = rx.recv().await;
+                if let Some(sub) = filtered.as_mut() {
+                    step.lost += sub.take_upstream_gap();
+                }
+                match result {
+                    Ok(msg) => {
+                        // Pre-validated Utf8Bytes: cloning is a refcount bump
+                        // on the shared Bytes, no per-client copy or UTF-8 scan.
+                        let text = stream_type.payload(&msg);
+                        if !text.is_empty() {
+                            step.send = Some(Message::Text(text.clone()));
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => step.lost += n,
+                    Err(broadcast::error::RecvError::Closed) => step.closed = true,
+                }
+            }
+            Self::Deflate { seat, synced } => match seat.rx.recv().await {
+                Ok(msg) => {
+                    *synced |= msg.boundary;
+                    let payload = msg.payload(stream_type.format());
+                    if *synced && !payload.is_empty() {
+                        step.send = Some(compressed_text(payload.clone()));
+                    }
+                }
+                Err(broadcast::error::RecvError::Lagged(n)) => {
+                    *synced = false;
+                    step.lost = n;
+                }
+                Err(broadcast::error::RecvError::Closed) => step.closed = true,
+            },
+        }
+        step
+    }
+}
+
+/// A text frame whose payload is already permessage-deflate compressed.
+fn compressed_text(payload: Bytes) -> Message {
+    let mut frame = Frame::message(payload, OpCode::Data(Data::Text), true);
+    frame.header_mut().rsv1 = true;
+    Message::Frame(frame)
+}
+
+type Socket = WebSocketStream<TokioIo<hyper::upgrade::Upgraded>>;
+
 async fn handle_socket(
-    socket: WebSocket,
-    mut rx: broadcast::Receiver<Arc<PreSerializedMessage>>,
-    mut filtered: Option<crate::filter::Subscription>,
+    socket: Socket,
+    mut feed: Feed,
     stream_type: StreamType,
     state: Arc<AppState>,
     client_ip: IpAddr,
@@ -222,9 +398,11 @@ async fn handle_socket(
         StreamType::DomainsOnly => "domains",
         StreamType::V2 => "v2",
     };
+    let compressed = matches!(feed, Feed::Deflate { .. });
 
     info!(
         stream = stream_name,
+        compressed,
         total = state.connections.total(),
         ip = %client_ip,
         "WS client connected"
@@ -244,8 +422,8 @@ async fn handle_socket(
     let pong_timeout = Duration::from_secs(45);
 
     // Outbound write deadline. A client whose TCP send buffer is full will
-    // back-pressure axum's Sink and `sender.send().await` blocks indefinitely.
-    // While blocked, this task can't drain `rx` or service pongs — the
+    // back-pressure the Sink and `sender.send().await` blocks indefinitely.
+    // While blocked, this task can't drain its feed or service pongs — the
     // broadcast Receiver keeps growing (other clients lag), the FD stays
     // open, and the connection counter is poisoned. 10 s is a generous
     // upper bound: any healthy client drains tens of KB in <1 s.
@@ -255,7 +433,7 @@ async fn handle_socket(
     // Helper: send with timeout. Returns false on send error OR timeout,
     // which the caller uses to break the loop.
     async fn send_with_deadline(
-        sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+        sender: &mut futures_util::stream::SplitSink<Socket, Message>,
         msg: Message,
         deadline: Duration,
     ) -> bool {
@@ -276,7 +454,7 @@ async fn handle_socket(
 
             _ = state.shutdown.cancelled() => {
                 let going_away = Message::Close(Some(CloseFrame {
-                    code: close_code::AWAY,
+                    code: CloseCode::Away,
                     reason: Utf8Bytes::from_static("server shutting down"),
                 }));
                 send_with_deadline(&mut sender, going_away, WRITE_TIMEOUT).await;
@@ -293,7 +471,7 @@ async fn handle_socket(
                     Some(Ok(Message::Pong(_))) => {
                         last_pong = std::time::Instant::now();
                     }
-                    Some(Ok(Message::Close(_))) | None => {
+                    Some(Ok(Message::Close(_))) | Some(Err(_)) | None => {
                         break;
                     }
                     _ => {}
@@ -305,7 +483,7 @@ async fn handle_socket(
                     debug!(ip = %client_ip, "client pong timeout, disconnecting");
                     break;
                 }
-                if !send_with_deadline(&mut sender, Message::Ping(bytes::Bytes::new()), WRITE_TIMEOUT).await {
+                if !send_with_deadline(&mut sender, Message::Ping(Bytes::new()), WRITE_TIMEOUT).await {
                     break;
                 }
             }
@@ -313,64 +491,41 @@ async fn handle_socket(
             _ = heartbeat_interval.tick() => {
                 // Text frame per certstream wire convention — JSON over WebSocket
                 // is Text, not Binary — a client that demuxes by frame type
-                // reads a Binary heartbeat as a protocol error.
+                // reads a Binary heartbeat as a protocol error. Sent
+                // uncompressed even on a compressed connection, which RFC 7692
+                // allows and which leaves the decompressor's window untouched.
                 let hb = Message::Text(Utf8Bytes::from_static(HEARTBEAT_JSON));
                 if !send_with_deadline(&mut sender, hb, WRITE_TIMEOUT).await {
                     break;
                 }
             }
 
-            result = rx.recv() => {
-                if let Some(sub) = filtered.as_mut() {
-                    let upstream = sub.take_upstream_gap();
-                    if upstream > 0 {
-                        debug!(dropped = upstream, ip = %client_ip, "filter dispatcher lost messages upstream");
-                        metrics::counter!("certstream_ws_messages_lagged").increment(upstream);
-                        if lag_window.record(std::time::Instant::now(), upstream) {
-                            metrics::counter!("certstream_ws_disconnect_lag").increment(1);
-                            break;
-                        }
+            step = feed.next(stream_type) => {
+                if step.lost > 0 {
+                    debug!(lagged = step.lost, ip = %client_ip, "client lagged, skipping messages");
+                    metrics::counter!("certstream_ws_messages_lagged").increment(step.lost);
+                    if lag_window.record(std::time::Instant::now(), step.lost) {
+                        debug!(
+                            ip = %client_ip,
+                            dropped = lag_window.dropped_in_window(),
+                            "client exceeded its drop budget, disconnecting"
+                        );
+                        metrics::counter!("certstream_ws_disconnect_lag").increment(1);
+                        break;
                     }
                 }
-                match result {
-                    Ok(msg) => {
-                        // Payloads are pre-validated Utf8Bytes — cloning is a
-                        // refcount bump on the shared Bytes, no per-client
-                        // UTF-8 scan and no allocation.
-                        let text = match stream_type {
-                            StreamType::Full => msg.full.clone(),
-                            StreamType::Lite => msg.lite.clone(),
-                            StreamType::DomainsOnly => msg.domains_only.clone(),
-                            StreamType::V2 => msg.v2.clone(),
-                        };
-                        if text.is_empty() {
-                            continue;
-                        }
-                        let frame_len = text.len() as u64;
-                        if !send_with_deadline(&mut sender, Message::Text(text), WRITE_TIMEOUT).await {
-                            break;
-                        }
-                        pending_bytes += frame_len;
-                        pending_frames += 1;
-                        if pending_frames >= BYTES_FLUSH_FRAMES {
-                            flush_bytes_sent(&state, &mut pending_bytes, &mut pending_frames);
-                        }
-                    }
-                    Err(broadcast::error::RecvError::Lagged(n)) => {
-                        debug!(lagged = n, ip = %client_ip, "client lagged, skipping messages");
-                        metrics::counter!("certstream_ws_messages_lagged").increment(n);
-                        if lag_window.record(std::time::Instant::now(), n) {
-                            debug!(
-                                ip = %client_ip,
-                                dropped = lag_window.dropped_in_window(),
-                                "client exceeded its drop budget, disconnecting"
-                            );
-                            metrics::counter!("certstream_ws_disconnect_lag").increment(1);
-                            break;
-                        }
-                    }
-                    Err(broadcast::error::RecvError::Closed) => {
+                if step.closed {
+                    break;
+                }
+                if let Some(frame) = step.send {
+                    let frame_len = frame.len() as u64;
+                    if !send_with_deadline(&mut sender, frame, WRITE_TIMEOUT).await {
                         break;
+                    }
+                    pending_bytes += frame_len;
+                    pending_frames += 1;
+                    if pending_frames >= BYTES_FLUSH_FRAMES {
+                        flush_bytes_sent(&state, &mut pending_bytes, &mut pending_frames);
                     }
                 }
             }

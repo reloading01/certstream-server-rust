@@ -498,10 +498,10 @@ pub fn broadcast_names(
 
     let size = payload.len();
     let _ = tx.send(Arc::new(PreSerializedMessage {
-        full: axum::extract::ws::Utf8Bytes::from_static(""),
-        lite: axum::extract::ws::Utf8Bytes::from_static(""),
+        full: tokio_tungstenite::tungstenite::Utf8Bytes::from_static(""),
+        lite: tokio_tungstenite::tungstenite::Utf8Bytes::from_static(""),
         domains_only: payload,
-        v2: axum::extract::ws::Utf8Bytes::from_static(""),
+        v2: tokio_tungstenite::tungstenite::Utf8Bytes::from_static(""),
         leaf: None,
     }));
     stats.messages_sent.fetch_add(1, Ordering::Relaxed);

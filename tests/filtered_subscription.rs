@@ -10,17 +10,18 @@ use std::net::{SocketAddr, TcpStream};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use axum::extract::ws::Utf8Bytes;
 use axum::routing::get;
 use axum::Router;
 use certstream_server_rust::api::ServerStats;
 use certstream_server_rust::config::{ConnectionLimitConfig, StreamConfig};
+use certstream_server_rust::deflate::DeflateHub;
 use certstream_server_rust::filter::FilterHub;
 use certstream_server_rust::middleware::ConnectionLimiter;
 use certstream_server_rust::models::{Extensions, LeafCert, PreSerializedMessage, Subject};
 use certstream_server_rust::sse::handle_sse_stream;
 use certstream_server_rust::websocket::{AppState, ConnectionCounter};
 use smallvec::SmallVec;
+use tokio_tungstenite::tungstenite::Utf8Bytes;
 use tokio::sync::broadcast;
 
 struct Harness {
@@ -46,6 +47,7 @@ async fn start() -> Harness {
         streams: Arc::new(StreamConfig::default()),
         stats: Arc::new(ServerStats::new()),
         filters: Arc::clone(&filters),
+        deflate: DeflateHub::new(tx.clone(), 1024),
         shutdown: tokio_util::sync::CancellationToken::new(),
     });
 

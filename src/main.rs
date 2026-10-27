@@ -4,6 +4,7 @@ mod cli;
 mod config;
 mod ct;
 mod dedup;
+mod deflate;
 mod filter;
 mod health;
 mod hot_reload;
@@ -1333,6 +1334,7 @@ fn build_router(protocols: &config::ProtocolConfig, config: &Config, deps: Route
     let streams = Arc::new(config.streams.clone());
     let state = Arc::new(AppState {
         filters: filter_hub,
+        deflate: deflate::DeflateHub::new(tx.clone(), config.buffer_size),
         tx: tx.clone(),
         connections: ConnectionCounter::new(),
         limiter: connection_limiter.clone(),

@@ -1,4 +1,4 @@
-use axum::extract::ws::Utf8Bytes;
+use tokio_tungstenite::tungstenite::Utf8Bytes;
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 use std::borrow::Cow;
