@@ -1,5 +1,27 @@
 # Release Notes
 
+## v1.7.1: Slow static-CT logs keep their in-flight tiles
+
+**Release date:** October 29, 2026
+
+**What was fixed:** a static-CT watcher that was behind dropped every tile request still in flight each time it stopped to re-read the log's checkpoint, every 30 seconds, and fetched those tiles again afterwards.
+
+**Affected:** static-CT logs whose tiles take several seconds to serve, most at a high `ct_log.fetch_concurrency`. Fast logs fit dozens of tiles in each 30 second window and lost little.
+
+**Upgrade:** recommended if a static-CT log stays behind on your install.
+
+### Fix
+
+When the checkpoint is due, the watcher now stops requesting new tiles but reads the ones already in flight before it polls. On Microsec Eszigno2027h1, whose tiles took 4 to 9 seconds from our test server, two interleaved runs at `fetch_concurrency: 16` read 9 and 17 tiles in four to five minutes on v1.7.0, and 21 and 125 on this release. The log's response time varied too much between runs for a firmer comparison.
+
+### Upgrade
+
+No configuration, metric or state-file changes; the upgrade is a drop-in.
+
+```bash
+docker pull ghcr.io/reloading01/certstream-server-rust:1.7.1
+```
+
 ## v1.7.0: WebSocket compression
 
 **Release date:** October 27, 2026
