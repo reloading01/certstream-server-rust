@@ -1,18 +1,31 @@
 # Release Notes
 
-## v1.7.1: Slow static-CT logs keep their in-flight tiles
+## v1.7.1: Slow static-CT logs no longer stall on the head refresh
 
 **Release date:** October 29, 2026
 
-**What was fixed:** a static-CT watcher that was behind dropped every tile request still in flight each time it stopped to re-read the log's checkpoint, every 30 seconds, and fetched those tiles again afterwards.
+**What was fixed:** a static-CT watcher that was behind stopped every 30 seconds to re-read the log's checkpoint. It dropped every tile request still in flight, waited for the checkpoint with nothing downloading, then fetched the dropped tiles again.
 
-**Affected:** static-CT logs whose tiles take several seconds to serve, most at a high `ct_log.fetch_concurrency`. Fast logs fit dozens of tiles in each 30 second window and lost little.
+**Affected:** static-CT logs whose tiles take several seconds to serve, most at a high `ct_log.fetch_concurrency`, where raising the concurrency made the watcher slower. Fast logs fit dozens of tiles in each 30 second window and lost little.
 
 **Upgrade:** recommended if a static-CT log stays behind on your install.
 
 ### Fix
 
-When the checkpoint is due, the watcher now stops requesting new tiles but reads the ones already in flight before it polls. On Microsec Eszigno2027h1, whose tiles took 4 to 9 seconds from our test server, two interleaved runs at `fetch_concurrency: 16` read 9 and 17 tiles in four to five minutes on v1.7.0, and 21 and 125 on this release. The log's response time varied too much between runs for a firmer comparison.
+Tile requests now run as tasks that outlive the refresh, and the checkpoint is requested in the background while the watcher keeps reading. Tiles queued under the previous checkpoint lie below its head and are processed as they arrive, so the pipeline stays full through the refresh.
+
+A tile that fails is fetched again on its own; the tiles behind it keep downloading. Before, one failure dropped every request in flight, so a log that split its bandwidth across `fetch_concurrency` requests, each then exceeding `request_timeout_secs`, refetched the same tiles over and over. The number of tiles in flight now halves after a failure and grows back by one per round of successful tiles, up to `fetch_concurrency`, so the watcher settles at a depth the log can serve in time.
+
+Measured on Microsec Eszigno2027h1 from our test server, 5 minutes per run from the same position. The log's speed changes from hour to hour, so compare runs within a window:
+
+| Window | `fetch_concurrency` | v1.7.0 | v1.7.1 |
+| --- | --- | --- | --- |
+| Tiles in 4 to 9 s | 16 | 53 entries/s | 120 entries/s |
+| Tiles in 4 to 9 s | 4 | 104 entries/s | 94 entries/s |
+| Slower | 16 | 11 entries/s | 71 entries/s |
+| Slower | 4 | | 76 entries/s |
+
+The first window's v1.7.1 runs predate the adaptive depth. At 4 the difference is within the log's run-to-run variation. At 16, v1.7.0 lost most of its time to dropped and timed-out tiles; v1.7.1 reads as fast as at 4, so a high `ct_log.fetch_concurrency` no longer hurts on a slow log.
 
 ### Upgrade
 
