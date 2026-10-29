@@ -8,9 +8,11 @@ use reqwest::Client;
 use signed_note::{Note, Verifier as NoteVerifier, VerifierList};
 use static_ct_api::RFC6962Verifier;
 use std::borrow::Cow;
+use std::collections::VecDeque;
 use std::fmt::Write;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio_util::task::AbortOnDropHandle;
 use tracing::{debug, error, info, warn};
 
 use super::watcher::LogHealth;
@@ -875,6 +877,76 @@ fn tail_start(tree_size: u64, overlap: u64) -> u64 {
     tree_size.saturating_sub(overlap)
 }
 
+struct QueuedTile {
+    tile_index: u64,
+    entries_in_tile: u64,
+    url: String,
+    requested_at: std::time::Instant,
+    fetch: AbortOnDropHandle<super::FetchOutcome>,
+}
+
+fn spawn_tile_fetch(
+    client: &Client,
+    limiter: &Option<super::OperatorRateLimiter>,
+    url: &str,
+    timeout: Duration,
+    log_desc: &str,
+) -> AbortOnDropHandle<super::FetchOutcome> {
+    let client = client.clone();
+    let limiter = limiter.clone();
+    let url = url.to_string();
+    let desc = log_desc.to_string();
+    AbortOnDropHandle::new(tokio::spawn(async move {
+        // Respect per-operator rate limit before making request
+        if let Some(ref l) = limiter {
+            l.tick().await;
+        }
+        match client.get(&url).timeout(timeout).send().await {
+            Ok(resp) => {
+                let status = resp.status();
+                if status.is_success() {
+                    match resp.bytes().await {
+                        Ok(b) => super::FetchOutcome::Body(b),
+                        Err(e) => super::FetchOutcome::Net(e.to_string()),
+                    }
+                } else {
+                    let retry_after_ms = (status.as_u16() == 429)
+                        .then(|| super::normalize::parse_retry_after(resp.headers(), &desc));
+                    super::FetchOutcome::Http(status, retry_after_ms)
+                }
+            }
+            Err(e) => super::FetchOutcome::Net(e.to_string()),
+        }
+    }))
+}
+
+/// A checkpoint response read to the end. The body is read where the request
+/// is sent: reqwest's total timeout also covers reading it, and a prefetched
+/// response can wait well past that before the poll gets to it.
+struct CheckpointReply {
+    status: reqwest::StatusCode,
+    /// Set for a 429 only.
+    retry_after_ms: Option<u64>,
+    body: reqwest::Result<String>,
+}
+
+async fn fetch_checkpoint(
+    client: &Client,
+    url: &str,
+    timeout: Duration,
+    log_desc: &str,
+) -> reqwest::Result<CheckpointReply> {
+    let resp = client.get(url).timeout(timeout).send().await?;
+    let status = resp.status();
+    let retry_after_ms = (status.as_u16() == 429)
+        .then(|| super::normalize::parse_retry_after(resp.headers(), log_desc));
+    Ok(CheckpointReply {
+        status,
+        retry_after_ms,
+        body: resp.text().await,
+    })
+}
+
 /// Static CT (checkpoint + tile protocol) watcher loop.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_static_ct_watcher(log: CtLog, ctx: WatcherContext) {
@@ -1157,6 +1229,21 @@ pub async fn run_static_ct_watcher(log: CtLog, ctx: WatcherContext) {
         sink.acks.resume_at(&base_url, current_index);
     }
 
+    // Tile fetches in flight, in index order, and the first entry index none
+    // of them covers. Both outlive a head refresh.
+    let mut queued: VecDeque<QueuedTile> = VecDeque::new();
+    let mut next_unqueued = current_index;
+    // How deep `queued` may grow. Tiles that fail at `fetch_concurrency` deep
+    // usually share a log's bandwidth too thinly to finish within the request
+    // timeout, so a failure halves the depth and each full round of successes
+    // adds one back.
+    let mut depth = fetch_concurrency;
+    let mut depth_successes = 0;
+    let mut last_slowdown: Option<std::time::Instant> = None;
+    // A checkpoint request sent while the drain keeps reading; the poll below
+    // uses its response instead of sending one.
+    let mut head_prefetch: Option<AbortOnDropHandle<reqwest::Result<CheckpointReply>>> = None;
+
     loop {
         if shutdown.is_cancelled() {
             info!(log = %log.description, "shutdown signal received (static CT)");
@@ -1187,6 +1274,8 @@ pub async fn run_static_ct_watcher(log: CtLog, ctx: WatcherContext) {
             match fetch_sth_tree_size(&client, &sth_url, timeout, &log.description).await {
                 Ok(size) => full_tile_floor(size),
                 Err(SthError::RateLimited(retry_after_ms)) => {
+                    queued.clear();
+                    next_unqueued = current_index;
                     health.record_rate_limit(retry_after_ms);
                     super::note_rate_limited(&rate_limiter);
                     metrics::counter!(
@@ -1211,12 +1300,22 @@ pub async fn run_static_ct_watcher(log: CtLog, ctx: WatcherContext) {
                 }
             }
         } else {
-            match client.get(&checkpoint_url).timeout(timeout).send().await {
+            let sent = match head_prefetch.take() {
+                Some(prefetch) => match prefetch.await {
+                    Ok(sent) => sent,
+                    Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
+                    // Cancelled only when the runtime shuts down.
+                    Err(_) => continue,
+                },
+                None => fetch_checkpoint(&client, &checkpoint_url, timeout, &log.description).await,
+            };
+            match sent {
                 Ok(resp) => {
-                    let status = resp.status();
-                    if status.as_u16() == 429 {
-                        let retry_after_ms =
-                            super::normalize::parse_retry_after(resp.headers(), &log.description);
+                    let status = resp.status;
+                    if let Some(retry_after_ms) = resp.retry_after_ms {
+                        // The queued tiles would hit the same limit.
+                        queued.clear();
+                        next_unqueued = current_index;
                         health.record_rate_limit(retry_after_ms);
                         super::note_rate_limited(&rate_limiter);
                         metrics::counter!(
@@ -1241,7 +1340,7 @@ pub async fn run_static_ct_watcher(log: CtLog, ctx: WatcherContext) {
                         sleep(health.get_backoff()).await;
                         continue;
                     }
-                    match resp.text().await {
+                    match resp.body {
                         Ok(text) => match parse_checkpoint(&text, &expected_origin) {
                             Some(cp) => {
                                 let sig = accept_checkpoint_signature(
@@ -1409,6 +1508,8 @@ pub async fn run_static_ct_watcher(log: CtLog, ctx: WatcherContext) {
                 sink.acks.record_skipped_range(&log_key, current_index, target);
             }
             current_index = target;
+            queued.clear();
+            next_unqueued = current_index;
             state_manager.update_index(&base_url, current_index, tree_size);
             tracker.update(
                 &base_url,
@@ -1419,583 +1520,621 @@ pub async fn run_static_ct_watcher(log: CtLog, ctx: WatcherContext) {
             );
         }
 
-        // Inner drain: fetch all available tiles before re-polling the
-        // checkpoint, pipelined `fetch_concurrency`-deep (each fetch still
-        // pays a token to the per-operator bucket, so the sustained request
-        // rate is unchanged). Tile geometry is deterministic from `tree_size`,
-        // so unlike get-entries there is no partial-response realignment —
-        // responses are simply processed in order. Once the head is due for a
-        // refresh no new tile is requested; tiles in flight are still read.
+        // Drain: tiles are fetched `fetch_concurrency`-deep as spawned tasks
+        // (each fetch still pays a token to the per-operator bucket, so the
+        // sustained request rate is unchanged) and processed in order. Tile
+        // geometry is deterministic from `tree_size`, so unlike get-entries
+        // there is no partial-response realignment. When the head is due for
+        // a refresh the checkpoint is requested in the background and the
+        // drain goes on until it answers; the queue is kept across the poll,
+        // since its tiles lie below the old head and stay valid.
+        let mut keep_queue = false;
         'tile_loop: while current_index < read_to && !shutdown.is_cancelled() {
-            use futures::StreamExt as _;
+            if head_polled.elapsed() >= super::HEAD_REFRESH_EVERY {
+                if tree_size_source == TreeSizeSource::GetSth {
+                    keep_queue = true;
+                    break 'tile_loop;
+                }
+                match &head_prefetch {
+                    None => {
+                        let client = client.clone();
+                        let url = checkpoint_url.clone();
+                        let desc = log.description.clone();
+                        head_prefetch = Some(AbortOnDropHandle::new(tokio::spawn(async move {
+                            fetch_checkpoint(&client, &url, timeout, &desc).await
+                        })));
+                    }
+                    Some(prefetch) if prefetch.is_finished() => {
+                        keep_queue = true;
+                        break 'tile_loop;
+                    }
+                    Some(_) => {}
+                }
+            }
 
-            // Copied out before the fetch stream borrows the environment.
             // Unknown (the first tile of a names-mode watcher) optimistically
-            // asks for names; a 404 settles it and the next drain uses data
-            // tiles.
+            // asks for names; a 404 settles it and the queue is rebuilt with
+            // data tiles.
             let want_names = serves_names_tiles.unwrap_or(names_mode);
-
-            let end_tile = (read_to.saturating_sub(1)) / 256;
-            let first_tile = current_index / 256;
-
-            let mut in_flight = futures::stream::iter((first_tile..=end_tile).map(|tile_index| {
-                let is_last_tile = tile_index == end_tile;
-                let entries_in_tile = if is_last_tile {
-                    let remainder = read_to % 256;
-                    if remainder == 0 { 256 } else { remainder }
-                } else {
-                    256
-                };
-                let partial_width = if is_last_tile && entries_in_tile < 256 {
-                    entries_in_tile
-                } else {
-                    0
-                };
-                (tile_index, entries_in_tile, partial_width)
-            }))
-            .take_while(|_| std::future::ready(head_polled.elapsed() < super::HEAD_REFRESH_EVERY))
-            .map(|(tile_index, entries_in_tile, partial_width)| {
-                let client = client.clone();
-                let limiter = rate_limiter.clone();
-                let desc = log.description.clone();
+            next_unqueued = next_unqueued.max(current_index);
+            while queued.len() < depth && next_unqueued < read_to {
+                let tile_index = next_unqueued / 256;
+                let entries_in_tile = ((tile_index + 1) * 256).min(read_to) - tile_index * 256;
+                let partial_width = if entries_in_tile < 256 { entries_in_tile } else { 0 };
                 let url = if want_names {
                     crate::ct::names_tiles::names_tile_url(&base_url, tile_index, partial_width)
                 } else {
                     tile_url(&base_url, 0, tile_index, partial_width)
                 };
-                async move {
-                    // Respect per-operator rate limit before making request
-                    if let Some(ref l) = limiter {
-                        l.tick().await;
-                    }
-                    let outcome = match client.get(&url).timeout(timeout).send().await {
-                        Ok(resp) => {
-                            let status = resp.status();
-                            if status.is_success() {
-                                match resp.bytes().await {
-                                    Ok(b) => super::FetchOutcome::Body(b),
-                                    Err(e) => super::FetchOutcome::Net(e.to_string()),
-                                }
-                            } else {
-                                let retry_after_ms = (status.as_u16() == 429).then(|| {
-                                    super::normalize::parse_retry_after(resp.headers(), &desc)
-                                });
-                                super::FetchOutcome::Http(status, retry_after_ms)
-                            }
-                        }
-                        Err(e) => super::FetchOutcome::Net(e.to_string()),
-                    };
-                    (tile_index, entries_in_tile, url, outcome)
-                }
-            })
-            .buffered(fetch_concurrency);
+                let fetch = spawn_tile_fetch(&client, &rate_limiter, &url, timeout, &log.description);
+                queued.push_back(QueuedTile {
+                    tile_index,
+                    entries_in_tile,
+                    url,
+                    requested_at: std::time::Instant::now(),
+                    fetch,
+                });
+                next_unqueued = tile_index * 256 + entries_in_tile;
+            }
 
-            while let Some((tile_index, entries_in_tile, url, outcome)) = in_flight.next().await {
-                if shutdown.is_cancelled() {
-                    break 'tile_loop;
-                }
-                let is_last_tile = tile_index == end_tile;
+            let Some(QueuedTile {
+                tile_index,
+                entries_in_tile,
+                url,
+                requested_at,
+                fetch,
+            }) = queued.pop_front()
+            else {
+                break 'tile_loop;
+            };
+            let outcome = match fetch.await {
+                Ok(outcome) => outcome,
+                Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
+                Err(_) => break 'tile_loop,
+            };
+            if shutdown.is_cancelled() {
+                break 'tile_loop;
+            }
+            // Where this tile ends, as scheduled; a later head may extend a
+            // partial tile, but this fetch holds only `entries_in_tile`.
+            let tile_end = tile_index * 256 + entries_in_tile;
 
-                let raw_data = match outcome {
-                    super::FetchOutcome::Body(b) => {
-                        super::note_success(&rate_limiter);
-                        b
-                    }
-                    super::FetchOutcome::Http(status, retry_after) => {
-                        if serves_names_tiles.is_none() && status.as_u16() == 404 {
-                            info!(
-                                log = %log.description,
-                                "log does not serve names tiles; using data tiles"
-                            );
-                            serves_names_tiles = Some(false);
-                            continue;
-                        }
-                        if let Some(retry_after_ms) = retry_after {
-                            health.record_rate_limit(retry_after_ms);
-                            super::note_rate_limited(&rate_limiter);
-                            metrics::counter!(
-                                "certstream_ct_log_rate_limited_total",
-                                "log" => log_name.clone(),
-                                "source_id" => source_id.clone(),
-                                "log_type" => "static_ct"
-                            )
-                            .increment(1);
-                            debug!(log = %log.description, retry_after_ms, "rate limited by static CT log, backing off");
-                        } else {
-                            health.record_failure(config.unhealthy_threshold);
-                            debug!(log = %log.description, url = %url, status = %status, "tile fetch failed");
-                        }
-                        sleep(health.get_backoff()).await;
-                        break 'tile_loop;
-                    }
-                    super::FetchOutcome::Net(e) => {
-                        health.record_failure(config.unhealthy_threshold);
-                        debug!(log = %log.description, url = %url, error = %e, "failed to fetch tile");
-                        sleep(health.get_backoff()).await;
-                        break 'tile_loop;
-                    }
-                };
-
-                health.record_success(config.healthy_threshold);
-                counter_tiles.increment(1);
-
-                if want_names {
-                    if serves_names_tiles.is_none() {
-                        info!(log = %log.description, "reading names tiles (unauthenticated)");
-                        serves_names_tiles = Some(true);
-                    }
-
-                    let tile_start_index = tile_index * 256;
-                    let skip = current_index.saturating_sub(tile_start_index) as usize;
-                    let slots = match tokio::task::spawn_blocking(move || {
-                        crate::ct::names_tiles::parse_names_tile(raw_data)
-                    })
-                    .await
-                    {
-                        Ok(v) => v,
-                        Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
-                        Err(_) => break 'tile_loop,
-                    };
-
-                    // A names tile holds one line per entry of the equivalent
-                    // data tile. A short tile means a truncated fetch or a
-                    // stale partial; advancing over it would skip entries that
-                    // were never read.
-                    if (slots.len() as u64) != entries_in_tile {
-                        warn!(
-                            log = %log.description,
-                            tile = tile_index,
-                            got = slots.len(),
-                            expected = entries_in_tile,
-                            "names tile entry count mismatch; skipping"
-                        );
-                        health.record_failure(config.unhealthy_threshold);
-                        sleep(health.get_backoff()).await;
-                        break 'tile_loop;
-                    }
-
-                    // `skip` counts entry slots, so the parser has to keep an
-                    // empty slot for every line it could not use.
-                    for entry in slots.into_iter().skip(skip).flatten() {
-                        if !dedup.is_new(&crate::ct::names_tiles::dedup_key(&entry)) {
-                            continue;
-                        }
-                        counter_entries_parsed.increment(1);
-                        crate::ct::broadcast_names(&entry, &tx, &stats, &counter_messages);
-                    }
-
-                    current_index = tile_start_index + entries_in_tile;
-                    state_manager.update_index(&base_url, current_index, tree_size);
-                    tracker.update(
-                        &base_url,
-                        health.status(),
-                        current_index,
-                        tree_size,
-                        health.total_errors(),
+            let fetched = match outcome {
+                super::FetchOutcome::Body(b) => Ok(b),
+                super::FetchOutcome::Http(status, _)
+                    if serves_names_tiles.is_none() && status.as_u16() == 404 =>
+                {
+                    info!(
+                        log = %log.description,
+                        "log does not serve names tiles; using data tiles"
                     );
+                    serves_names_tiles = Some(false);
+                    queued.clear();
+                    next_unqueued = current_index;
                     continue;
                 }
+                super::FetchOutcome::Http(_, Some(retry_after_ms)) => {
+                    health.record_rate_limit(retry_after_ms);
+                    super::note_rate_limited(&rate_limiter);
+                    metrics::counter!(
+                        "certstream_ct_log_rate_limited_total",
+                        "log" => log_name.clone(),
+                        "source_id" => source_id.clone(),
+                        "log_type" => "static_ct"
+                    )
+                    .increment(1);
+                    debug!(log = %log.description, retry_after_ms, "rate limited by static CT log, backing off");
+                    sleep(health.get_backoff()).await;
+                    break 'tile_loop;
+                }
+                super::FetchOutcome::Http(status, None) => Err(format!("HTTP {status}")),
+                super::FetchOutcome::Net(e) => Err(e),
+            };
+            let raw_data = match fetched {
+                Ok(b) => {
+                    super::note_success(&rate_limiter);
+                    if depth < fetch_concurrency {
+                        depth_successes += 1;
+                        if depth_successes >= depth {
+                            depth += 1;
+                            depth_successes = 0;
+                        }
+                    }
+                    b
+                }
+                Err(e) => {
+                    debug!(log = %log.description, url = %url, error = %e, depth, "failed to fetch tile");
+                    // Tiles requested before the last slowdown were in flight
+                    // alongside the one that caused it and often fail with it;
+                    // only a tile requested since then is a new failure.
+                    if last_slowdown.is_none_or(|at| requested_at > at) {
+                        depth = (depth / 2).max(1);
+                        last_slowdown = Some(std::time::Instant::now());
+                        health.record_failure(config.unhealthy_threshold);
+                        sleep(health.get_backoff()).await;
+                    }
+                    depth_successes = 0;
+                    if entries_in_tile < 256 {
+                        // A log may delete a partial tile once the full one is
+                        // published; rebuild the queue from the current head.
+                        queued.clear();
+                        next_unqueued = current_index;
+                    } else {
+                        // Only this tile is fetched again; the rest keep downloading.
+                        queued.push_front(QueuedTile {
+                            tile_index,
+                            entries_in_tile,
+                            fetch: spawn_tile_fetch(&client, &rate_limiter, &url, timeout, &log.description),
+                            url,
+                            requested_at: std::time::Instant::now(),
+                        });
+                    }
+                    if !health.is_healthy() {
+                        keep_queue = true;
+                        break 'tile_loop;
+                    }
+                    continue;
+                }
+            };
 
-                // Decompression (up to 16 MiB) + tile parsing is
-                // pure CPU with no yield points — run it on the
-                // blocking pool so concurrent catch-up across many
-                // watchers doesn't starve the async runtime.
-                let leaves = match tokio::task::spawn_blocking(move || {
-                    let data: Bytes = match decompress_tile(&raw_data) {
-                        // Not gzip (or decode failure): content is
-                        // the response body as-is — reuse it.
-                        Cow::Borrowed(_) => raw_data,
-                        Cow::Owned(v) => Bytes::from(v),
-                    };
-                    parse_tile_leaves(data)
+            health.record_success(config.healthy_threshold);
+            counter_tiles.increment(1);
+
+            if want_names {
+                if serves_names_tiles.is_none() {
+                    info!(log = %log.description, "reading names tiles (unauthenticated)");
+                    serves_names_tiles = Some(true);
+                }
+
+                let tile_start_index = tile_index * 256;
+                let skip = current_index.saturating_sub(tile_start_index) as usize;
+                let slots = match tokio::task::spawn_blocking(move || {
+                    crate::ct::names_tiles::parse_names_tile(raw_data)
                 })
                 .await
                 {
                     Ok(v) => v,
-                    // Re-raise worker panics so the supervisor's
-                    // catch_unwind recovery path still fires.
                     Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
-                    // Cancelled (runtime shutdown) — bail out quietly.
                     Err(_) => break 'tile_loop,
                 };
 
-                // Static-CT-API rc.1: a tile must contain exactly
-                // `entries_in_tile` leaves (256 for full, partial
-                // width for the last). Mismatches indicate either
-                // a corrupt fetch (truncated body) or a server
-                // serving stale partials — drop the tile and
-                // retry rather than emitting partial data.
-                if (leaves.len() as u64) != entries_in_tile {
+                // A names tile holds one line per entry of the equivalent
+                // data tile. A short tile means a truncated fetch or a
+                // stale partial; advancing over it would skip entries that
+                // were never read.
+                if (slots.len() as u64) != entries_in_tile {
                     warn!(
                         log = %log.description,
                         tile = tile_index,
-                        got = leaves.len(),
+                        got = slots.len(),
                         expected = entries_in_tile,
-                        partial = is_last_tile && entries_in_tile < 256,
-                        "tile leaf count mismatch; skipping"
+                        "names tile entry count mismatch; skipping"
                     );
-                    metrics::counter!(
-                        "certstream_static_ct_tile_width_mismatch",
-                        "log" => log_name.clone(),
-                        "source_id" => source_id.clone()
-                    )
-                    .increment(1);
                     health.record_failure(config.unhealthy_threshold);
                     sleep(health.get_backoff()).await;
                     break 'tile_loop;
                 }
 
-                let tile_start_index = tile_index * 256;
-
-                // Inclusion: prove the entries about to be broadcast are the
-                // ones the signed tree holds at those indexes. Done before the
-                // broadcast, so a tile that cannot be proven is never emitted.
-                if merkle_mode.checks_inclusion()
-                    && let Some(reader) = &tile_reader
-                {
-                    let claims: Vec<(u64, Bytes)> = leaves
-                        .iter()
-                        .enumerate()
-                        .map(|(i, leaf)| {
-                            (tile_start_index + i as u64, leaf.timestamped_entry.clone())
-                        })
-                        .collect();
-                    let reader = Arc::clone(reader);
-                    let root = match crate::ct::merkle::parse_root_hash(&last_checkpoint_root) {
-                        Ok(h) => h,
-                        Err(e) => {
-                            warn!(log = %log.description, error = %e, "cannot verify inclusion");
-                            break 'tile_loop;
-                        }
-                    };
-                    let verdict = tokio::task::spawn_blocking(move || {
-                        crate::ct::merkle::verify_inclusion(&reader, tree_size, root, &claims)
-                    })
-                    .await;
-                    let verdict = match verdict {
-                        Ok(v) => v,
-                        Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
-                        Err(_) => break 'tile_loop,
-                    };
-                    match verdict {
-                        crate::ct::merkle::Verdict::Verified => {
-                            metrics::counter!(
-                                "certstream_static_ct_inclusion_verified",
-                                "log" => log_name.clone(),
-                                "source_id" => source_id.clone()
-                            )
-                            .increment(leaves.len() as u64);
-                            verification.inclusion =
-                                crate::models::VerificationState::Verified;
-                        }
-                        // The tree could not be read, which is not evidence
-                        // against the tile. Deliver it saying so, rather than
-                        // dropping data every time the log rate-limits us or
-                        // moves past a partial tile.
-                        crate::ct::merkle::Verdict::Unavailable(reason) => {
-                            metrics::counter!(
-                                "certstream_static_ct_inclusion_unavailable",
-                                "log" => log_name.clone(),
-                                "source_id" => source_id.clone()
-                            )
-                            .increment(1);
-                            debug!(
-                                log = %log.description,
-                                tile = tile_index,
-                                reason = %reason,
-                                "inclusion proof unavailable"
-                            );
-                            verification.inclusion =
-                                crate::models::VerificationState::Unverified;
-                        }
-                        crate::ct::merkle::Verdict::Mismatch(reason) => {
-                            warn!(
-                                log = %log.description,
-                                tile = tile_index,
-                                error = %reason,
-                                "tile does not match the signed tree; dropping it"
-                            );
-                            metrics::counter!(
-                                "certstream_static_ct_inclusion_failed",
-                                "log" => log_name.clone(),
-                                "source_id" => source_id.clone()
-                            )
-                            .increment(1);
-                            health.record_failure(config.unhealthy_threshold);
-                            sleep(health.get_backoff()).await;
-                            break 'tile_loop;
-                        }
+                // `skip` counts entry slots, so the parser has to keep an
+                // empty slot for every line it could not use.
+                for entry in slots.into_iter().skip(skip).flatten() {
+                    if !dedup.is_new(&crate::ct::names_tiles::dedup_key(&entry)) {
+                        continue;
                     }
+                    counter_entries_parsed.increment(1);
+                    crate::ct::broadcast_names(&entry, &tx, &stats, &counter_messages);
                 }
 
-                let offset_in_tile = if current_index > tile_start_index {
-                    (current_index - tile_start_index) as usize
-                } else {
-                    0
-                };
-
-                // Pre-warm the issuer cache for unique chain fingerprints
-                // across this tile slice. Two safeties on top of the H-3 fix:
-                //   1. Concurrency cap (`MAX_INFLIGHT_ISSUER_FETCHES`) so a
-                //      tile with a huge chain count can't fan out into 65K
-                //      concurrent HTTP requests to the operator's /issuer/
-                //      endpoint — that bypasses the per-operator rate limiter
-                //      and triggers IP bans / 429-storms.
-                //   2. Per-fingerprint cache skip: only fetch what we don't
-                //      already have, since the cache is now shared across
-                //      all watchers and common roots (R10, ISRG X1) cache
-                //      across logs.
-                //
-                // Chain certs are only consumed by the `full` stream, so
-                // skip the issuer fetches entirely when it's disabled.
-                if streams.full {
-                    use futures::stream::{self, StreamExt};
-                    use std::collections::HashSet;
-                    const MAX_INFLIGHT_ISSUER_FETCHES: usize = 16;
-
-                    let unique_fps: HashSet<[u8; 32]> = leaves
-                        .iter()
-                        .skip(offset_in_tile)
-                        .flat_map(|l| l.chain_fingerprints.iter().copied())
-                        .filter(|fp| issuer_cache.get(fp).is_none())
-                        .collect();
-                    if !unique_fps.is_empty() {
-                        stream::iter(unique_fps)
-                            .for_each_concurrent(MAX_INFLIGHT_ISSUER_FETCHES, |fp| {
-                                let client = client.clone();
-                                let base_url = base_url.clone();
-                                let issuer_cache = issuer_cache.clone();
-                                async move {
-                                    let _ = fetch_issuer(
-                                        &client,
-                                        &base_url,
-                                        &fp,
-                                        &issuer_cache,
-                                        timeout,
-                                        issuer_parse_opts,
-                                    )
-                                    .await;
-                                }
-                            })
-                            .await;
-                    }
-                }
-
-                let leaf_count = leaves.len();
-
-                // X.509 parse + hashing for a whole tile slice is
-                // pure CPU — run it on the blocking pool (same
-                // rationale as the decompress hop above). One hop
-                // amortised over up to 256 leaves.
-                let job_dedup = Arc::clone(&dedup);
-                let job_tx = tx.clone();
-                let job_cache = Arc::clone(&cache);
-                let job_stats = Arc::clone(&stats);
-                let job_streams = Arc::clone(&streams);
-                let job_retain_leaf = filters.active();
-                let job_verification = verification;
-                let job_source = Arc::clone(&source);
-                let job_issuer_cache = Arc::clone(&issuer_cache);
-                let job_counter_messages = counter_messages.clone();
-                let job_counter_parse_failures = counter_parse_failures.clone();
-                let job_counter_entries_parsed = counter_entries_parsed.clone();
-                let job_counter_leaf_index_mismatch = counter_leaf_index_mismatch.clone();
-                let job_log_name = log_name.clone();
-                let job_base_url = base_url.clone();
-                let job_state_manager = Arc::clone(&state_manager);
-                let job_tracker = Arc::clone(&tracker);
-                let job_health = Arc::clone(&health);
-                let full_stream_enabled = streams.full;
-                // Identical for every leaf in the tile — format once.
-                let tile_cert_link =
-                    format!("{}/tile/data/{}", base_url, encode_tile_path(tile_index));
-                let job_durable = nats.is_some();
-                let job_nats_subject = nats_subject.clone().unwrap_or_default();
-                let job_log_url: Arc<str> = Arc::from(base_url.as_str());
-                let job_log_key = log_id_for_msgs.clone();
-                let join = tokio::task::spawn_blocking(move || {
-                    let mut newest_submission = 0.0f64;
-                    let mut durable: Vec<crate::nats::Record> = Vec::new();
-                    let mut skipped: Vec<u64> = Vec::new();
-                    let targets = crate::ct::BroadcastTargets {
-                        tx: &job_tx,
-                        cache: &job_cache,
-                        stats: &job_stats,
-                        messages_counter: &job_counter_messages,
-                        streams: &job_streams,
-                        retain_leaf: job_retain_leaf,
-                    };
-                    for (i, leaf) in leaves.into_iter().enumerate().skip(offset_in_tile) {
-                        let cert_index = tile_start_index + i as u64;
-
-                        // Static-CT-API rc.1: when the log populates
-                        // the leaf_index SCT extension, it must equal
-                        // the entry's tile-derived index. Mismatches
-                        // are integrity violations (or operator bugs)
-                        // — count them but continue with our index,
-                        // which is grounded in tile coordinates.
-                        if let Some(li) = leaf.leaf_index
-                            && li != cert_index
-                        {
-                            warn!(
-                                log = %job_log_name,
-                                expected = cert_index,
-                                got = li,
-                                "leaf_index extension disagrees with tile-derived index"
-                            );
-                            job_counter_leaf_index_mismatch.increment(1);
-                        }
-
-                        let parsed = match parse_certificate_with_options(
-                            &leaf.cert_der,
-                            leaf_parse_opts,
-                        ) {
-                            Some(p) => p,
-                            None => {
-                                debug!(log = %job_log_name, index = cert_index, "skipped unparseable cert (static CT)");
-                                job_counter_parse_failures.increment(1);
-                                // Nothing will ever be published for this
-                                // index, so settle it or the durable position
-                                // stops here.
-                                skipped.push(cert_index);
-                                continue;
-                            }
-                        };
-
-                        job_counter_entries_parsed.increment(1);
-
-                        let is_new = job_dedup.is_new(&parsed.sha256_raw);
-                        if !is_new && !job_durable {
-                            continue;
-                        }
-
-                        let seen = chrono::Utc::now().timestamp_millis() as f64 / 1000.0;
-                        newest_submission =
-                            newest_submission.max(leaf.submission_timestamp as f64 / 1000.0);
-                        // Chain certs are only serialized by the `full`
-                        // stream; the cache hands back pre-parsed
-                        // Arc<ChainCert>s, so this is a refcount bump
-                        // per issuer instead of a re-parse per leaf.
-                        let chain: Vec<Arc<ChainCert>> = if is_new && full_stream_enabled {
-                            leaf.chain_fingerprints
-                                .iter()
-                                // Pre-warm above already issued a concurrent
-                                // fetch round populating the cache; here we
-                                // just read it. If the pre-warm failed for
-                                // this fp, skip rather than re-issuing a
-                                // serial network round-trip on the hot path.
-                                .filter_map(|fp| job_issuer_cache.get(fp).flatten())
-                                .collect()
-                        } else {
-                            Vec::new()
-                        };
-
-                        let update_type = if leaf.is_precert {
-                            Cow::Borrowed("PrecertLogEntry")
-                        } else {
-                            Cow::Borrowed("X509LogEntry")
-                        };
-
-                        // Wrapped once and shared with the cache entry.
-                        let leaf_arc = Arc::new(parsed);
-                        let cached = build_cached_cert(
-                            Arc::clone(&leaf_arc),
-                            seen,
-                            Arc::clone(&job_source),
-                            cert_index,
-                        );
-                        let msg = CertificateMessage {
-                            message_type: Cow::Borrowed("certificate_update"),
-                            data: CertificateData {
-                                update_type,
-                                leaf_cert: leaf_arc,
-                                chain: if chain.is_empty() { None } else { Some(chain) },
-                                cert_index,
-                                cert_link: tile_cert_link.clone(),
-                                seen,
-                                submission_timestamp: leaf.submission_timestamp as f64 / 1000.0,
-                                source: Arc::clone(&job_source),
-                                verification: job_verification,
-                            },
-                        };
-                        // Published before the live dedup is applied. Dedup
-                        // collapses one certificate seen in several logs, but
-                        // a durable record is addressed by (log_id, index) —
-                        // each log's entry is a distinct record, and dropping
-                        // the second one would leave a permanent hole in that
-                        // log's position. JetStream deduplicates identical
-                        // republishes by message id.
-                        if job_durable {
-                            match msg.to_v2_json() {
-                                Ok(json) => durable.push(crate::nats::Record {
-                                    log_url: Arc::clone(&job_log_url),
-                                    msg_id: format!("{job_log_key}:{cert_index}"),
-                                    index: cert_index,
-                                    subject: job_nats_subject.clone(),
-                                    payload: bytes::Bytes::from(json),
-                                }),
-                                Err(_) => skipped.push(cert_index),
-                            }
-                        }
-
-                        if is_new {
-                            broadcast_cert(msg, cached, &targets);
-                        }
-                    }
-
-                    // Checkpoint INSIDE the job: if the supervisor's
-                    // select! drops the watcher future at the
-                    // `join.await` below (shutdown), the detached
-                    // blocking task still runs to completion — the
-                    // broadcasts above and this index persist stay
-                    // atomic, so a restart doesn't replay the tile.
-                    crate::ct::record_ingest_delay(
-                        &job_log_name,
-                        newest_submission,
-                        chrono::Utc::now().timestamp_millis() as f64 / 1000.0,
-                    );
-
-                    let next_index = ((tile_index + 1) * 256).min(read_to);
-                    job_state_manager.update_index(&job_base_url, next_index, tree_size);
-                    job_tracker.update(
-                        &job_base_url,
-                        job_health.status(),
-                        next_index,
-                        tree_size,
-                        job_health.total_errors(),
-                    );
-                    (durable, skipped, newest_submission)
-                });
-                match join.await {
-                    Ok((durable, skipped, newest_submission)) => {
-                        if newest_submission > 0.0 {
-                            newest_read = Some(newest_submission);
-                        }
-                        // Queued after the broadcast, awaited before the next
-                        // tile: under `on_full: block` this is where ingest
-                        // slows down to match durable storage.
-                        if let Some(sink) = &nats {
-                            let log_key: Arc<str> = Arc::from(base_url.as_str());
-                            for index in skipped {
-                                sink.acks.record_skipped(&log_key, index);
-                            }
-                            for record in durable {
-                                sink.publish(record).await;
-                            }
-                        }
-                    }
-                    Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
-                    Err(_) => break 'tile_loop,
-                }
-
-                current_index = ((tile_index + 1) * 256).min(read_to);
-
-                debug!(log = %log.description, tile = tile_index, leaves = leaf_count, "processed static CT tile");
+                current_index = tile_start_index + entries_in_tile;
+                state_manager.update_index(&base_url, current_index, tree_size);
+                tracker.update(
+                    &base_url,
+                    health.status(),
+                    current_index,
+                    tree_size,
+                    health.total_errors(),
+                );
+                continue;
             }
 
-            if head_polled.elapsed() >= super::HEAD_REFRESH_EVERY {
+            // Decompression (up to 16 MiB) + tile parsing is
+            // pure CPU with no yield points — run it on the
+            // blocking pool so concurrent catch-up across many
+            // watchers doesn't starve the async runtime.
+            let leaves = match tokio::task::spawn_blocking(move || {
+                let data: Bytes = match decompress_tile(&raw_data) {
+                    // Not gzip (or decode failure): content is
+                    // the response body as-is — reuse it.
+                    Cow::Borrowed(_) => raw_data,
+                    Cow::Owned(v) => Bytes::from(v),
+                };
+                parse_tile_leaves(data)
+            })
+            .await
+            {
+                Ok(v) => v,
+                // Re-raise worker panics so the supervisor's
+                // catch_unwind recovery path still fires.
+                Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
+                // Cancelled (runtime shutdown) — bail out quietly.
+                Err(_) => break 'tile_loop,
+            };
+
+            // Static-CT-API rc.1: a tile must contain exactly
+            // `entries_in_tile` leaves (256 for full, partial
+            // width for the last). Mismatches indicate either
+            // a corrupt fetch (truncated body) or a server
+            // serving stale partials — drop the tile and
+            // retry rather than emitting partial data.
+            if (leaves.len() as u64) != entries_in_tile {
+                warn!(
+                    log = %log.description,
+                    tile = tile_index,
+                    got = leaves.len(),
+                    expected = entries_in_tile,
+                    partial = entries_in_tile < 256,
+                    "tile leaf count mismatch; skipping"
+                );
+                metrics::counter!(
+                    "certstream_static_ct_tile_width_mismatch",
+                    "log" => log_name.clone(),
+                    "source_id" => source_id.clone()
+                )
+                .increment(1);
+                health.record_failure(config.unhealthy_threshold);
+                sleep(health.get_backoff()).await;
                 break 'tile_loop;
             }
+
+            let tile_start_index = tile_index * 256;
+
+            // Inclusion: prove the entries about to be broadcast are the
+            // ones the signed tree holds at those indexes. Done before the
+            // broadcast, so a tile that cannot be proven is never emitted.
+            if merkle_mode.checks_inclusion()
+                && let Some(reader) = &tile_reader
+            {
+                let claims: Vec<(u64, Bytes)> = leaves
+                    .iter()
+                    .enumerate()
+                    .map(|(i, leaf)| {
+                        (tile_start_index + i as u64, leaf.timestamped_entry.clone())
+                    })
+                    .collect();
+                let reader = Arc::clone(reader);
+                let root = match crate::ct::merkle::parse_root_hash(&last_checkpoint_root) {
+                    Ok(h) => h,
+                    Err(e) => {
+                        warn!(log = %log.description, error = %e, "cannot verify inclusion");
+                        break 'tile_loop;
+                    }
+                };
+                let verdict = tokio::task::spawn_blocking(move || {
+                    crate::ct::merkle::verify_inclusion(&reader, tree_size, root, &claims)
+                })
+                .await;
+                let verdict = match verdict {
+                    Ok(v) => v,
+                    Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
+                    Err(_) => break 'tile_loop,
+                };
+                match verdict {
+                    crate::ct::merkle::Verdict::Verified => {
+                        metrics::counter!(
+                            "certstream_static_ct_inclusion_verified",
+                            "log" => log_name.clone(),
+                            "source_id" => source_id.clone()
+                        )
+                        .increment(leaves.len() as u64);
+                        verification.inclusion =
+                            crate::models::VerificationState::Verified;
+                    }
+                    // The tree could not be read, which is not evidence
+                    // against the tile. Deliver it saying so, rather than
+                    // dropping data every time the log rate-limits us or
+                    // moves past a partial tile.
+                    crate::ct::merkle::Verdict::Unavailable(reason) => {
+                        metrics::counter!(
+                            "certstream_static_ct_inclusion_unavailable",
+                            "log" => log_name.clone(),
+                            "source_id" => source_id.clone()
+                        )
+                        .increment(1);
+                        debug!(
+                            log = %log.description,
+                            tile = tile_index,
+                            reason = %reason,
+                            "inclusion proof unavailable"
+                        );
+                        verification.inclusion =
+                            crate::models::VerificationState::Unverified;
+                    }
+                    crate::ct::merkle::Verdict::Mismatch(reason) => {
+                        warn!(
+                            log = %log.description,
+                            tile = tile_index,
+                            error = %reason,
+                            "tile does not match the signed tree; dropping it"
+                        );
+                        metrics::counter!(
+                            "certstream_static_ct_inclusion_failed",
+                            "log" => log_name.clone(),
+                            "source_id" => source_id.clone()
+                        )
+                        .increment(1);
+                        health.record_failure(config.unhealthy_threshold);
+                        sleep(health.get_backoff()).await;
+                        break 'tile_loop;
+                    }
+                }
+            }
+
+            let offset_in_tile = if current_index > tile_start_index {
+                (current_index - tile_start_index) as usize
+            } else {
+                0
+            };
+
+            // Pre-warm the issuer cache for unique chain fingerprints
+            // across this tile slice. Two safeties on top of the H-3 fix:
+            //   1. Concurrency cap (`MAX_INFLIGHT_ISSUER_FETCHES`) so a
+            //      tile with a huge chain count can't fan out into 65K
+            //      concurrent HTTP requests to the operator's /issuer/
+            //      endpoint — that bypasses the per-operator rate limiter
+            //      and triggers IP bans / 429-storms.
+            //   2. Per-fingerprint cache skip: only fetch what we don't
+            //      already have, since the cache is now shared across
+            //      all watchers and common roots (R10, ISRG X1) cache
+            //      across logs.
+            //
+            // Chain certs are only consumed by the `full` stream, so
+            // skip the issuer fetches entirely when it's disabled.
+            if streams.full {
+                use futures::stream::{self, StreamExt};
+                use std::collections::HashSet;
+                const MAX_INFLIGHT_ISSUER_FETCHES: usize = 16;
+
+                let unique_fps: HashSet<[u8; 32]> = leaves
+                    .iter()
+                    .skip(offset_in_tile)
+                    .flat_map(|l| l.chain_fingerprints.iter().copied())
+                    .filter(|fp| issuer_cache.get(fp).is_none())
+                    .collect();
+                if !unique_fps.is_empty() {
+                    stream::iter(unique_fps)
+                        .for_each_concurrent(MAX_INFLIGHT_ISSUER_FETCHES, |fp| {
+                            let client = client.clone();
+                            let base_url = base_url.clone();
+                            let issuer_cache = issuer_cache.clone();
+                            async move {
+                                let _ = fetch_issuer(
+                                    &client,
+                                    &base_url,
+                                    &fp,
+                                    &issuer_cache,
+                                    timeout,
+                                    issuer_parse_opts,
+                                )
+                                .await;
+                            }
+                        })
+                        .await;
+                }
+            }
+
+            let leaf_count = leaves.len();
+
+            // X.509 parse + hashing for a whole tile slice is
+            // pure CPU — run it on the blocking pool (same
+            // rationale as the decompress hop above). One hop
+            // amortised over up to 256 leaves.
+            let job_dedup = Arc::clone(&dedup);
+            let job_tx = tx.clone();
+            let job_cache = Arc::clone(&cache);
+            let job_stats = Arc::clone(&stats);
+            let job_streams = Arc::clone(&streams);
+            let job_retain_leaf = filters.active();
+            let job_verification = verification;
+            let job_source = Arc::clone(&source);
+            let job_issuer_cache = Arc::clone(&issuer_cache);
+            let job_counter_messages = counter_messages.clone();
+            let job_counter_parse_failures = counter_parse_failures.clone();
+            let job_counter_entries_parsed = counter_entries_parsed.clone();
+            let job_counter_leaf_index_mismatch = counter_leaf_index_mismatch.clone();
+            let job_log_name = log_name.clone();
+            let job_base_url = base_url.clone();
+            let job_state_manager = Arc::clone(&state_manager);
+            let job_tracker = Arc::clone(&tracker);
+            let job_health = Arc::clone(&health);
+            let full_stream_enabled = streams.full;
+            // Identical for every leaf in the tile — format once.
+            let tile_cert_link =
+                format!("{}/tile/data/{}", base_url, encode_tile_path(tile_index));
+            let job_durable = nats.is_some();
+            let job_nats_subject = nats_subject.clone().unwrap_or_default();
+            let job_log_url: Arc<str> = Arc::from(base_url.as_str());
+            let job_log_key = log_id_for_msgs.clone();
+            let join = tokio::task::spawn_blocking(move || {
+                let mut newest_submission = 0.0f64;
+                let mut durable: Vec<crate::nats::Record> = Vec::new();
+                let mut skipped: Vec<u64> = Vec::new();
+                let targets = crate::ct::BroadcastTargets {
+                    tx: &job_tx,
+                    cache: &job_cache,
+                    stats: &job_stats,
+                    messages_counter: &job_counter_messages,
+                    streams: &job_streams,
+                    retain_leaf: job_retain_leaf,
+                };
+                for (i, leaf) in leaves.into_iter().enumerate().skip(offset_in_tile) {
+                    let cert_index = tile_start_index + i as u64;
+
+                    // Static-CT-API rc.1: when the log populates
+                    // the leaf_index SCT extension, it must equal
+                    // the entry's tile-derived index. Mismatches
+                    // are integrity violations (or operator bugs)
+                    // — count them but continue with our index,
+                    // which is grounded in tile coordinates.
+                    if let Some(li) = leaf.leaf_index
+                        && li != cert_index
+                    {
+                        warn!(
+                            log = %job_log_name,
+                            expected = cert_index,
+                            got = li,
+                            "leaf_index extension disagrees with tile-derived index"
+                        );
+                        job_counter_leaf_index_mismatch.increment(1);
+                    }
+
+                    let parsed = match parse_certificate_with_options(
+                        &leaf.cert_der,
+                        leaf_parse_opts,
+                    ) {
+                        Some(p) => p,
+                        None => {
+                            debug!(log = %job_log_name, index = cert_index, "skipped unparseable cert (static CT)");
+                            job_counter_parse_failures.increment(1);
+                            // Nothing will ever be published for this
+                            // index, so settle it or the durable position
+                            // stops here.
+                            skipped.push(cert_index);
+                            continue;
+                        }
+                    };
+
+                    job_counter_entries_parsed.increment(1);
+
+                    let is_new = job_dedup.is_new(&parsed.sha256_raw);
+                    if !is_new && !job_durable {
+                        continue;
+                    }
+
+                    let seen = chrono::Utc::now().timestamp_millis() as f64 / 1000.0;
+                    newest_submission =
+                        newest_submission.max(leaf.submission_timestamp as f64 / 1000.0);
+                    // Chain certs are only serialized by the `full`
+                    // stream; the cache hands back pre-parsed
+                    // Arc<ChainCert>s, so this is a refcount bump
+                    // per issuer instead of a re-parse per leaf.
+                    let chain: Vec<Arc<ChainCert>> = if is_new && full_stream_enabled {
+                        leaf.chain_fingerprints
+                            .iter()
+                            // Pre-warm above already issued a concurrent
+                            // fetch round populating the cache; here we
+                            // just read it. If the pre-warm failed for
+                            // this fp, skip rather than re-issuing a
+                            // serial network round-trip on the hot path.
+                            .filter_map(|fp| job_issuer_cache.get(fp).flatten())
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
+
+                    let update_type = if leaf.is_precert {
+                        Cow::Borrowed("PrecertLogEntry")
+                    } else {
+                        Cow::Borrowed("X509LogEntry")
+                    };
+
+                    // Wrapped once and shared with the cache entry.
+                    let leaf_arc = Arc::new(parsed);
+                    let cached = build_cached_cert(
+                        Arc::clone(&leaf_arc),
+                        seen,
+                        Arc::clone(&job_source),
+                        cert_index,
+                    );
+                    let msg = CertificateMessage {
+                        message_type: Cow::Borrowed("certificate_update"),
+                        data: CertificateData {
+                            update_type,
+                            leaf_cert: leaf_arc,
+                            chain: if chain.is_empty() { None } else { Some(chain) },
+                            cert_index,
+                            cert_link: tile_cert_link.clone(),
+                            seen,
+                            submission_timestamp: leaf.submission_timestamp as f64 / 1000.0,
+                            source: Arc::clone(&job_source),
+                            verification: job_verification,
+                        },
+                    };
+                    // Published before the live dedup is applied. Dedup
+                    // collapses one certificate seen in several logs, but
+                    // a durable record is addressed by (log_id, index) —
+                    // each log's entry is a distinct record, and dropping
+                    // the second one would leave a permanent hole in that
+                    // log's position. JetStream deduplicates identical
+                    // republishes by message id.
+                    if job_durable {
+                        match msg.to_v2_json() {
+                            Ok(json) => durable.push(crate::nats::Record {
+                                log_url: Arc::clone(&job_log_url),
+                                msg_id: format!("{job_log_key}:{cert_index}"),
+                                index: cert_index,
+                                subject: job_nats_subject.clone(),
+                                payload: bytes::Bytes::from(json),
+                            }),
+                            Err(_) => skipped.push(cert_index),
+                        }
+                    }
+
+                    if is_new {
+                        broadcast_cert(msg, cached, &targets);
+                    }
+                }
+
+                // Checkpoint INSIDE the job: if the supervisor's
+                // select! drops the watcher future at the
+                // `join.await` below (shutdown), the detached
+                // blocking task still runs to completion — the
+                // broadcasts above and this index persist stay
+                // atomic, so a restart doesn't replay the tile.
+                crate::ct::record_ingest_delay(
+                    &job_log_name,
+                    newest_submission,
+                    chrono::Utc::now().timestamp_millis() as f64 / 1000.0,
+                );
+
+                job_state_manager.update_index(&job_base_url, tile_end, tree_size);
+                job_tracker.update(
+                    &job_base_url,
+                    job_health.status(),
+                    tile_end,
+                    tree_size,
+                    job_health.total_errors(),
+                );
+                (durable, skipped, newest_submission)
+            });
+            match join.await {
+                Ok((durable, skipped, newest_submission)) => {
+                    if newest_submission > 0.0 {
+                        newest_read = Some(newest_submission);
+                    }
+                    // Queued after the broadcast, awaited before the next
+                    // tile: under `on_full: block` this is where ingest
+                    // slows down to match durable storage.
+                    if let Some(sink) = &nats {
+                        let log_key: Arc<str> = Arc::from(base_url.as_str());
+                        for index in skipped {
+                            sink.acks.record_skipped(&log_key, index);
+                        }
+                        for record in durable {
+                            sink.publish(record).await;
+                        }
+                    }
+                }
+                Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
+                Err(_) => break 'tile_loop,
+            }
+
+            current_index = tile_end;
+
+            debug!(log = %log.description, tile = tile_index, leaves = leaf_count, "processed static CT tile");
+        }
+        if !keep_queue {
+            queued.clear();
+            next_unqueued = current_index;
         }
 
         if current_index >= read_to {
