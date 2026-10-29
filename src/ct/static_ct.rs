@@ -1424,7 +1424,8 @@ pub async fn run_static_ct_watcher(log: CtLog, ctx: WatcherContext) {
         // pays a token to the per-operator bucket, so the sustained request
         // rate is unchanged). Tile geometry is deterministic from `tree_size`,
         // so unlike get-entries there is no partial-response realignment —
-        // responses are simply processed in order.
+        // responses are simply processed in order. Once the head is due for a
+        // refresh no new tile is requested; tiles in flight are still read.
         'tile_loop: while current_index < read_to && !shutdown.is_cancelled() {
             use futures::StreamExt as _;
 
@@ -1452,6 +1453,7 @@ pub async fn run_static_ct_watcher(log: CtLog, ctx: WatcherContext) {
                 };
                 (tile_index, entries_in_tile, partial_width)
             }))
+            .take_while(|_| std::future::ready(head_polled.elapsed() < super::HEAD_REFRESH_EVERY))
             .map(|(tile_index, entries_in_tile, partial_width)| {
                 let client = client.clone();
                 let limiter = rate_limiter.clone();
@@ -1591,9 +1593,6 @@ pub async fn run_static_ct_watcher(log: CtLog, ctx: WatcherContext) {
                         tree_size,
                         health.total_errors(),
                     );
-                    if head_polled.elapsed() >= super::HEAD_REFRESH_EVERY {
-                        break 'tile_loop;
-                    }
                     continue;
                 }
 
@@ -1992,10 +1991,10 @@ pub async fn run_static_ct_watcher(log: CtLog, ctx: WatcherContext) {
                 current_index = ((tile_index + 1) * 256).min(read_to);
 
                 debug!(log = %log.description, tile = tile_index, leaves = leaf_count, "processed static CT tile");
+            }
 
-                if head_polled.elapsed() >= super::HEAD_REFRESH_EVERY {
-                    break 'tile_loop;
-                }
+            if head_polled.elapsed() >= super::HEAD_REFRESH_EVERY {
+                break 'tile_loop;
             }
         }
 
