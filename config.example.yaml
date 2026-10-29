@@ -137,11 +137,12 @@ ct_log:
   # Operators whose watchers fetch over HTTP/1.1 instead of HTTP/2. DigiCert
   # throttles per TCP connection, and HTTP/2 puts every request for a host on
   # one connection; under HTTP/1.1 each in-flight fetch needs its own
-  # connection and so carries its own quota. The per-operator rate limiter
-  # still gates every fetch, so this redistributes the request rate rather
-  # than raising it. Names are matched like operator_rate_limits keys.
+  # connection and so carries its own quota. Microsec resets HTTP/2 streams
+  # under concurrent tile fetches. The per-operator rate limiter still gates
+  # every fetch, so this redistributes the request rate rather than raising
+  # it. Names are matched like operator_rate_limits keys; [] turns it off.
   # (env: CERTSTREAM_CT_LOG_FORCE_HTTP1_OPERATORS, comma-separated)
-  force_http1_operators: []
+  force_http1_operators: [digicert, microsec]
   # Catalog logs that are never monitored or contacted: every log of an
   # operator, or single logs by the URL /api/logs shows. Handy for operators
   # that refuse you, or to cut CPU and bandwidth. Logs in static_logs are not

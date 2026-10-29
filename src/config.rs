@@ -260,11 +260,12 @@ pub struct CtLogConfig {
     /// Operators whose watchers fetch over a dedicated HTTP/1.1-only client.
     /// DigiCert throttles per TCP connection rather than per IP; under HTTP/2
     /// reqwest multiplexes every request for a host onto one connection, so
-    /// that per-connection quota becomes a whole-process quota. HTTP/1.1
-    /// spreads the same request rate — still capped by the per-operator
-    /// limiter — over one connection per in-flight fetch. Names are
-    /// canonicalized with the same rules as `operator_rate_limits`.
-    #[serde(default)]
+    /// that per-connection quota becomes a whole-process quota. Microsec resets
+    /// HTTP/2 streams under concurrent tile fetches. HTTP/1.1 spreads the same
+    /// request rate — still capped by the per-operator limiter — over one
+    /// connection per in-flight fetch. Names are canonicalized with the same
+    /// rules as `operator_rate_limits`.
+    #[serde(default = "default_force_http1_operators")]
     pub force_http1_operators: Vec<String>,
     /// Operators whose catalog logs are never monitored. Names are
     /// canonicalized like `operator_rate_limits` keys. Logs configured by hand
@@ -472,7 +473,7 @@ impl Default for CtLogConfig {
             default_operator_rate_limit_ms: default_operator_rate_limit_ms(),
             operator_rate_limits: std::collections::HashMap::new(),
             user_agent: None,
-            force_http1_operators: Vec::new(),
+            force_http1_operators: default_force_http1_operators(),
             excluded_operators: Vec::new(),
             excluded_logs: Vec::new(),
             catalog_authority_overrides: std::collections::HashMap::new(),
@@ -546,6 +547,9 @@ fn default_poll_interval_ms() -> u64 {
 }
 fn default_fetch_concurrency() -> u32 {
     4
+}
+pub fn default_force_http1_operators() -> Vec<String> {
+    vec!["digicert".to_string(), "microsec".to_string()]
 }
 fn default_partial_tile_wait_secs() -> u64 {
     60
@@ -1427,6 +1431,11 @@ force_http1_operators:
 "#;
         let config: CtLogConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.force_http1_operators, vec!["DigiCert", "Geomys"]);
+
+        let config: CtLogConfig = serde_yaml::from_str("force_http1_operators: []").unwrap();
+        assert!(config.force_http1_operators.is_empty());
+        let config: CtLogConfig = serde_yaml::from_str("batch_size: 256").unwrap();
+        assert_eq!(config.force_http1_operators, vec!["digicert", "microsec"]);
     }
 
     #[test]

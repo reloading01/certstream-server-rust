@@ -810,7 +810,12 @@ fn warn_unmatched_operators(config: &Config, all_logs: &[ct::CtLog]) {
         ),
         (
             "ct_log.force_http1_operators",
-            unmatched_operator_keys(&config.ct_log.force_http1_operators, &known_operators),
+            // The defaults name operators that excluded or disabled logs may remove.
+            if config.ct_log.force_http1_operators == config::default_force_http1_operators() {
+                Vec::new()
+            } else {
+                unmatched_operator_keys(&config.ct_log.force_http1_operators, &known_operators)
+            },
         ),
     ] {
         if !unmatched.is_empty() {

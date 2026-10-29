@@ -763,7 +763,6 @@ sudo systemctl enable --now certstream-server-rust</pre>
   <span class="str">retry_max_attempts</span>: <span class="var">3</span>
   <span class="str">request_timeout_secs</span>: <span class="var">30</span>
   <span class="str">user_agent</span>: <span class="str">"certstream-server-rust (security@example.com)"</span>
-  <span class="str">force_http1_operators</span>: [<span class="str">"DigiCert"</span>]
 
 <span class="str">dedup</span>:
   <span class="str">capacity</span>: <span class="var">200000</span>
@@ -803,7 +802,7 @@ sudo systemctl enable --now certstream-server-rust</pre>
                 <p>Some RFC 6962 logs serve static-CT tiles but no <code>/checkpoint</code>. Set <code>tree_size_source: get_sth</code> on a <code>static_logs</code> entry to take the tree size from <code>get-sth</code> and read entries from the tiles. The server cannot verify such a log itself.</p>
 
                 <h3>Forcing HTTP/1.1</h3>
-                <p>Some operators limit per TCP connection, and HTTP/2 shares one connection across watchers. List them under <code>ct_log.force_http1_operators</code> to give each its own HTTP/1.1 connections. The request rate does not change.</p>
+                <p>Some operators limit per TCP connection, and HTTP/2 shares one connection across watchers. Operators listed under <code>ct_log.force_http1_operators</code> get their own HTTP/1.1 connections. The default is <code>[digicert, microsec]</code>: DigiCert throttles per connection, and Microsec resets HTTP/2 streams under concurrent tile fetches. Set it to <code>[]</code> to use HTTP/2 everywhere. The request rate does not change.</p>
             </div>
         </section>
 
