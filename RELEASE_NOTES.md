@@ -1,5 +1,29 @@
 # Release Notes
 
+## v1.7.2: Microsec and DigiCert use HTTP/1.1 by default
+
+**Release date:** October 29, 2026
+
+**What changed:** `ct_log.force_http1_operators` now defaults to `[digicert, microsec]` instead of `[]`.
+
+**Affected:** installs that monitor Microsec's static-CT logs and leave `force_http1_operators` unset. Under concurrent tile fetches Microsec resets HTTP/2 streams; reqwest then reports "error decoding response body" because the gzip stream ends early, and the watcher retries the tile. DigiCert throttles per TCP connection, which v1.5.4 already documented with the same setting.
+
+**Upgrade:** recommended if a Microsec log stays behind on your install.
+
+### Measurements
+
+Microsec Eszigno2027h1 from our test server, 90 seconds per run from the same position, `fetch_concurrency: 8`: 6 tiles over HTTP/2, 54 over HTTP/1.1. At `fetch_concurrency: 16` over HTTP/1.1, 76 tiles with no failed request.
+
+On the public API the same log read 81 entries/s over HTTP/2 at depth 8 while it grew by 101, so the gap widened. Over HTTP/1.1 at depth 16 it read 283 entries/s while growing by 144.
+
+### Upgrade
+
+A config that sets `force_http1_operators` keeps its own list. To stay on HTTP/2 everywhere, set it to `[]` or `CERTSTREAM_CT_LOG_FORCE_HTTP1_OPERATORS=""`. No metric or state-file changes.
+
+```bash
+docker pull ghcr.io/reloading01/certstream-server-rust:1.7.2
+```
+
 ## v1.7.1: Slow static-CT logs no longer stall on the head refresh
 
 **Release date:** October 29, 2026
