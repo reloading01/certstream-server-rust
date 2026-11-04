@@ -305,6 +305,11 @@ certstream.listen_for_events(on_message, url="wss://api.certstream.dev/lite")</p
                     <p>
                         Running this endpoint costs real money every month. The server and its bandwidth are paid for by donations and out of our own pocket. Sponsorships keep it free, and they are what lets us add capacity as more people connect. If the stream is useful to you, please consider sponsoring the project on GitHub.
                     </p>
+                    <p>
+                        Every public sponsor is shown below, companies with their logo.
+                    </p>
+                    <div class="sponsor-list" id="sponsors"></div>
+                    <p class="live-status" id="sponsors-empty" hidden>No sponsors yet. Yours could be the first.</p>
                     <div style="margin-top: 24px;">
                         <a href="https://github.com/sponsors/reloading01" class="btn btn-primary" target="_blank" rel="noopener">Sponsor on GitHub</a>
                     </div>
@@ -383,6 +388,24 @@ certstream.listen_for_events(on_message, url="wss://api.certstream.dev/lite")</p
         }
 
         function pollTwice() { poll(); setTimeout(poll, 2000); }
+
+        fetch('/stats.json').then(function (r) { return r.json(); }).then(function (s) {
+          var list = $('sponsors');
+          (s.sponsors || []).forEach(function (sp) {
+            var a = document.createElement('a');
+            a.href = sp.url;
+            a.title = sp.login;
+            a.target = '_blank';
+            a.rel = 'noopener';
+            var img = document.createElement('img');
+            img.src = sp.avatar;
+            img.alt = sp.login;
+            img.loading = 'lazy';
+            a.appendChild(img);
+            list.appendChild(a);
+          });
+          $('sponsors-empty').hidden = list.children.length > 0;
+        });
 
         pollTwice();
         setInterval(poll, 5000);

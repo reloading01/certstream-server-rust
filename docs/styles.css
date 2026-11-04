@@ -546,6 +546,8 @@ footer .colophon { font-family: 'IBM Plex Mono', monospace; font-size: 0.78rem; 
 .live-label { font-size: 0.82rem; color: var(--ink-3); }
 .live-value { font-family: 'IBM Plex Mono', monospace; font-size: 1.6rem; font-weight: 500; color: var(--ink); line-height: 1.2; }
 .live-status { margin-top: 14px; font-size: 0.85rem; color: var(--ink-3); }
+.sponsor-list { display: flex; flex-wrap: wrap; gap: 10px; }
+.sponsor-list img { width: 48px; height: 48px; border-radius: 50%; border: 1px solid var(--line); display: block; }
 .endpoints-table + .code-examples { margin-top: 28px; }
 .hero-note { margin-top: 20px; font-size: 0.95rem; color: var(--ink-2); }
 .faq { display: grid; gap: 24px; margin-bottom: 28px; max-width: 70ch; }
