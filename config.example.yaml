@@ -116,14 +116,20 @@ ct_log:
   # fastest an operator is asked, one budget shared by all of that operator's
   # logs. An operator that answers 429 is slowed from there (by a quarter per
   # answer, up to one second) and sped up again once it stays quiet, so the
-  # value only needs raising to hold a particular operator to a gentler pace:
+  # value only needs raising to hold a particular operator to a gentler pace.
+  # The default holds Cloudflare to 125 ms (8 requests a second): it blocks
+  # an IP for a minute after 100 requests in 10 seconds, and the slowdown
+  # after a 429 comes too late to avoid that. Setting the map replaces the
+  # default, so keep cloudflare when adding an operator:
   #   operator_rate_limits:
+  #     cloudflare: 125
   #     geomys: 1000
   # Watch certstream_ct_log_rate_limited_total and
   # certstream_operator_request_interval_ms.
   default_operator_rate_limit_ms: 25
   # (env: CERTSTREAM_CT_LOG_OPERATOR_RATE_LIMITS, e.g. trustasia=10,digicert=40)
-  operator_rate_limits: {}
+  operator_rate_limits:
+    cloudflare: 125
   # User-Agent for all outbound HTTP. Some operators (e.g. Geomys) apply a
   # more generous rate limit tier to clients that include a contact email.
   # GoDaddy limits by the product and version at the start of the string

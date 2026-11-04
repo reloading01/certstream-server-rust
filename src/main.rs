@@ -806,11 +806,15 @@ fn warn_unmatched_operators(config: &Config, all_logs: &[ct::CtLog]) {
     for (field, unmatched) in [
         (
             "ct_log.operator_rate_limits",
-            unmatched_operator_keys(config.ct_log.operator_rate_limits.keys(), &known_operators),
+            // The defaults name operators that excluded or disabled logs may remove.
+            if config.ct_log.operator_rate_limits == config::default_operator_rate_limits() {
+                Vec::new()
+            } else {
+                unmatched_operator_keys(config.ct_log.operator_rate_limits.keys(), &known_operators)
+            },
         ),
         (
             "ct_log.force_http1_operators",
-            // The defaults name operators that excluded or disabled logs may remove.
             if config.ct_log.force_http1_operators == config::default_force_http1_operators() {
                 Vec::new()
             } else {

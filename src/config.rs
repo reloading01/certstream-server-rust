@@ -248,7 +248,9 @@ pub struct CtLogConfig {
     /// Per-operator overrides. Keys are canonicalized at use, so a YAML key like
     /// "digicert" matches the catalog-emitted operator regardless of case,
     /// whitespace, or punctuation. Empty map means every operator uses the default.
-    #[serde(default)]
+    /// The default holds Cloudflare to 125 ms: it blocks an IP for a minute
+    /// after 100 requests in 10 seconds.
+    #[serde(default = "default_operator_rate_limits")]
     pub operator_rate_limits: std::collections::HashMap<String, u64>,
     /// HTTP User-Agent for outbound requests. Some CT log operators (e.g.
     /// Geomys) apply a more generous rate limit tier to clients that include
@@ -471,7 +473,7 @@ impl Default for CtLogConfig {
             rfc6962_enabled: true,
             static_ct_enabled: true,
             default_operator_rate_limit_ms: default_operator_rate_limit_ms(),
-            operator_rate_limits: std::collections::HashMap::new(),
+            operator_rate_limits: default_operator_rate_limits(),
             user_agent: None,
             force_http1_operators: default_force_http1_operators(),
             excluded_operators: Vec::new(),
@@ -511,6 +513,9 @@ fn parse_operator_rate_limits(raw: &str) -> std::collections::HashMap<String, u6
 
 fn default_operator_rate_limit_ms() -> u64 {
     25
+}
+pub fn default_operator_rate_limits() -> std::collections::HashMap<String, u64> {
+    std::collections::HashMap::from([("cloudflare".to_string(), 125)])
 }
 
 fn default_retry_max_attempts() -> u32 {
@@ -1406,6 +1411,19 @@ user_agent: "certstream-server-rust/1.5.3 (contact@example.com)"
         assert_eq!(parsed["TrustAsia"], 10);
         assert_eq!(parsed["digicert"], 40);
         assert!(parse_operator_rate_limits("").is_empty());
+    }
+
+    #[test]
+    fn test_ct_log_config_deserialize_operator_rate_limits() {
+        let config: CtLogConfig = serde_yaml::from_str("batch_size: 256").unwrap();
+        assert_eq!(config.operator_rate_limits, default_operator_rate_limits());
+        assert_eq!(config.operator_rate_limits["cloudflare"], 125);
+
+        let config: CtLogConfig = serde_yaml::from_str("operator_rate_limits: {}").unwrap();
+        assert!(config.operator_rate_limits.is_empty());
+        let config: CtLogConfig =
+            serde_yaml::from_str("operator_rate_limits:\n  geomys: 1000").unwrap();
+        assert_eq!(config.operator_rate_limits.len(), 1);
     }
 
     #[test]
