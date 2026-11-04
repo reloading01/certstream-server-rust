@@ -1,5 +1,27 @@
 # Release Notes
 
+## v1.7.3: Cloudflare is paced at 125 ms by default
+
+**Release date:** November 4, 2026
+
+**What changed:** `ct_log.operator_rate_limits` now defaults to `{cloudflare: 125}` instead of `{}`, so Cloudflare's logs share at most 8 requests a second.
+
+**Affected:** installs that monitor Cloudflare Nimbus and leave `operator_rate_limits` unset. Cloudflare blocks an IP for a minute after 100 requests in 10 seconds. At the 25 ms default a catch-up burst hits that limit before the adaptive slowdown sees its first 429, and the log stops for the length of the block.
+
+**Upgrade:** recommended if you see "Retry-After below floor" warnings for Cloudflare or Nimbus falls behind after its hourly STH update.
+
+### Measurements
+
+On the public API at 25 ms, Nimbus2027 read about 1,000 entries/s for 22 seconds, got a 429 and did not advance for the next 40 seconds; the server logged 706 Retry-After warnings in 24 hours. At 125 ms it read about 1,900 entries/s for 4 minutes without a stall, and logged one 429 and no Retry-After warnings in 19 hours.
+
+### Upgrade
+
+A config that sets `operator_rate_limits` keeps its own map and loses the Cloudflare entry, so add `cloudflare: 125` next to your other operators. `{}` or `CERTSTREAM_CT_LOG_OPERATOR_RATE_LIMITS=""` returns Cloudflare to the default interval. No metric or state-file changes.
+
+```bash
+docker pull ghcr.io/reloading01/certstream-server-rust:1.7.3
+```
+
 ## v1.7.2: Microsec and DigiCert use HTTP/1.1 by default
 
 **Release date:** October 29, 2026
