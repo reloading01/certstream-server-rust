@@ -200,6 +200,7 @@
                     </tbody>
                 </table>
                 <p>Keep the key private. A client that can set headers should send <code>Authorization: Bearer KEY</code> instead, which keeps the key out of URLs and proxy logs.</p>
+                <p>Each IP address can hold two connections at once. A third is refused with HTTP 429.</p>
                 <div class="code-examples">
                     <div class="code-example">
                         <div class="code-example-header"><span class="lang">Python</span></div>
