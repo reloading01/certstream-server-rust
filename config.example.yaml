@@ -26,7 +26,7 @@ streams:
   domains_only: true  # Domains-only stream (~200 B/cert)
   # Version 2 output: the same certificate with an explicit source address
   # (log_id + entry index), entry type, observation time, and what was
-  # actually verified. Off by default — it is a fourth serialization of every
+  # actually verified. Off by default - it is a fourth serialization of every
   # certificate. Served at ws://host/v2 and /sse?stream=v2.
   # (env: CERTSTREAM_STREAM_V2_ENABLED)
   v2: false
@@ -41,8 +41,8 @@ ct_log:
   health_check_interval_secs: 60
   state_file: "certstream_state.json"
   # What to do when state_file exists but cannot be read or parsed.
-  #   fresh (default) — warn and restart every watcher from the log head
-  #   fail            — refuse to start, so a lost position is never silent
+  #   fresh (default) - warn and restart every watcher from the log head
+  #   fail            - refuse to start, so a lost position is never silent
   # A missing state file is a first run and starts fresh under both.
   state_recovery: fresh
   # Entries requested per get-entries call. Servers clamp to their own max;
@@ -83,18 +83,18 @@ ct_log:
   # (env: CERTSTREAM_CT_LOG_REFRESH_INTERVAL_SECS)
   log_refresh_interval_secs: 3600
   # What a refresh does with a running watcher whose log is no longer listed.
-  #   stop (default) — stop it; the saved position is kept, so a log that
+  #   stop (default) - stop it; the saved position is kept, so a log that
   #                    reappears resumes where it stopped
-  #   keep           — leave it running
+  #   keep           - leave it running
   # Never applies to custom_logs / static_logs entries: those come from this
   # config, so the catalog delisting them says nothing.
   # A refresh that fails or resolves zero logs changes nothing.
   # (env: CERTSTREAM_CT_LOG_REMOVED_POLICY)
   removed_log_policy: stop
   # Merkle verification against a static-CT log's own hash tiles.
-  #   off (default)  — trust the checkpoint signature and read
-  #   consistency    — prove each new checkpoint extends the previous one
-  #   full           — consistency, plus prove every ingested entry is in the
+  #   off (default)  - trust the checkpoint signature and read
+  #   consistency    - prove each new checkpoint extends the previous one
+  #   full           - consistency, plus prove every ingested entry is in the
   #                    signed tree
   # A tile the log will not serve (a 429, or a partial tile it has moved past)
   # marks the entry `inclusion: unverified` and delivery continues; only a
@@ -166,7 +166,7 @@ ct_log:
 # transition where the same cert appears in 3-4 logs in tight 60s MMD windows.
 dedup:
   capacity: 1000000   # max in-flight fingerprints
-  ttl_secs: 900       # 15-minute window — keep above max log MMD
+  ttl_secs: 900       # 15-minute window - keep above max log MMD
 
 connection_limit:
   enabled: false

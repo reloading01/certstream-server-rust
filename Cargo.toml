@@ -29,7 +29,7 @@ simd = ["simd-json"]
 #
 #   * Number precision: round-trip for normal f64 values is byte-identical
 #     to serde_json. Denormals and very-large integers above 2^53 may
-#     stringify slightly differently — irrelevant for our payload.
+#     stringify slightly differently, irrelevant for our payload.
 #
 #   * Unicode escaping: serde_json escapes some non-ASCII control bytes
 #     that sonic-rs leaves raw. Both are valid JSON per RFC 8259, but
