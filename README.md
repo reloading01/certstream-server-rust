@@ -8,7 +8,7 @@ A Certstream server written in Rust. It monitors Certificate Transparency (CT) l
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Sponsor](https://img.shields.io/badge/sponsor-%E2%9D%A4-ff69b4?logo=githubsponsors)](https://github.com/sponsors/reloading01)
 
-<p align="center"><img src="docs/demo.svg" width="640" alt="websocat connected to wss://api.certstream.dev/domains-only, printing newly issued certificate domains as they arrive"></p>
+<p align="center"><img src="docs/demo.svg" width="640" alt="websocat connected to wss://api.certstream.dev/domains-only with an API key, printing newly issued certificate domains as they arrive"></p>
 
 ## Overview
 
@@ -35,7 +35,7 @@ Key features:
 
 Full API documentation, client examples, configuration reference, and self-hosting notes are at [certstream.dev](https://certstream.dev/docs.html).
 
-Want the stream without running a server? There is a [free hosted CertStream API](https://certstream.dev/free-certstream-api.html) at `wss://api.certstream.dev/`.
+Want the stream without running a server? A [hosted CertStream API](https://certstream.dev/hosted-api.html) is available at `wss://api.certstream.dev/` with an API key, from $2 a month through [GitHub Sponsors](https://github.com/sponsors/reloading01).
 
 ## Installation
 

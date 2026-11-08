@@ -10,7 +10,7 @@ On one measured deployment, the server processed around 420 certificates and 700
 
 - [Home](https://certstream.dev/): project overview, installation options, and features
 - [API documentation](https://certstream.dev/docs.html): WebSocket and SSE endpoints, message formats, environment variables, and REST API
-- [Free CertStream API](https://certstream.dev/free-certstream-api.html): a free hosted CertStream-compatible WebSocket API at api.certstream.dev, no key required
+- [Hosted CertStream API](https://certstream.dev/hosted-api.html): a hosted CertStream-compatible WebSocket API at api.certstream.dev, API key from $2 a month through GitHub Sponsors
 - [Quick start](https://certstream.dev/quickstart.html): running the server and connecting a client
 - [Architecture](https://certstream.dev/architecture.html): ingest pipeline, broadcast path, deduplication, and state persistence
 
