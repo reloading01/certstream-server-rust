@@ -8,8 +8,6 @@ A Certstream server written in Rust. It monitors Certificate Transparency (CT) l
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Sponsor](https://img.shields.io/badge/sponsor-%E2%9D%A4-ff69b4?logo=githubsponsors)](https://github.com/sponsors/reloading01)
 
-<p align="center"><img src="docs/demo.svg" width="640" alt="websocat connected to wss://api.certstream.dev/domains-only with an API key, printing newly issued certificate domains as they arrive"></p>
-
 ## Overview
 
 Certstream aggregates certificates from Certificate Transparency logs and streams them in real time. This implementation is compatible with existing Certstream clients and supports both RFC 6962 and static-CT logs.

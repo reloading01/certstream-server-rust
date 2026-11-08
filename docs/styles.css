@@ -173,7 +173,6 @@ nav .nav-links { display: flex; gap: 30px; list-style: none; }
 .hero-stats a:hover { color: var(--ink); text-decoration: none; }
 .hero-demo { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
 .hero-demo .code-example pre { font-size: 0.8rem; }
-.hero-term { width: 100%; height: auto; display: block; border-radius: var(--radius); }
 .copy-btn {
     margin-left: auto;
     background: none;
