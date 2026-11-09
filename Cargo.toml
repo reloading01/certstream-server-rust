@@ -11,7 +11,7 @@ description = "High-performance Certificate Transparency log streaming server"
 keywords = ["certificate", "transparency", "certstream", "websocket", "tls"]
 categories = ["command-line-utilities", "network-programming"]
 # The published crate is the server, not the site or the dashboards.
-exclude = ["docs/", "grafana/", "soak/", "packaging/", "*.png", "certstream_state.json"]
+exclude = ["grafana/", "soak/", "packaging/", "*.png", "certstream_state.json"]
 
 [features]
 default = ["simd"]
