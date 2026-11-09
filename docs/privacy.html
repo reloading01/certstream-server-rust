@@ -101,7 +101,9 @@
                 <div class="center-block">
                     <p>Connections to api.certstream.dev pass through Cloudflare, which sees your IP address and request details under the <a href="https://www.cloudflare.com/privacypolicy/" target="_blank" rel="noopener">Cloudflare privacy policy</a>.</p>
                     <p>The server logs your IP address, the stream you picked, and when each connection opens and closes. We use these logs to enforce the per-IP connection limit and to find clients that abuse the service. Old entries are overwritten as the logs rotate, after about a week at current traffic.</p>
-                    <p>The numbers on the <a href="hosted-api.html">Hosted API</a> page are totals for the whole server, not per client. The API sets no cookies, and we do not sell or share the logs.</p>
+                    <p>Streams need an API key. When you sponsor and sign in with GitHub at api.certstream.dev/claim, we store your GitHub numeric id and login, your sponsorship tier and amount, when each key was created and last used, and the addresses each key connected from in the last 30 days. The addresses are used only to enforce the per-key address limit and to spot shared keys. A key is shown once and only a hashed copy is kept. GitHub handles your payment, and we never see payment details.</p>
+                    <p>Signing in sets one session cookie, used only on the claim and account pages. The streams set no cookies, and we do not sell or share any of this.</p>
+                    <p>A key passed in the URL can appear in the request logs of Cloudflare, which sits in front of the API. Send it in an <code>Authorization: Bearer</code> header where your client allows it.</p>
                 </div>
             </div>
         </section>
