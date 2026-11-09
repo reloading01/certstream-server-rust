@@ -106,7 +106,7 @@
       "name": "Can I share my key with my team or resell access?",
       "acceptedAnswer": {
         "@type": "Answer",
-        "text": "A key belongs to one customer. Each key works from a limited number of IP addresses in 24 hours (3 on Stream, 5 on Full, more on the higher tiers), so a key passed around stops working for new addresses. Sharing or reselling keys is not allowed and revokes the key. A team that needs more addresses can sponsor at a higher tier."
+        "text": "A key belongs to one customer. Each key works from a limited number of IP addresses in 24 hours (3 on Stream, 5 on Full, 25 on Team, 100 on Business), so a key passed around stops working for new addresses. Sharing or reselling keys is not allowed and revokes the key. A team that needs more addresses can sponsor at the Team or Business tier."
       }
     },
     {
@@ -179,7 +179,8 @@
                     <tbody>
                         <tr><td>Stream</td><td>$2 a month</td><td>Domains-only and lite</td></tr>
                         <tr><td>Full</td><td>$10 a month</td><td>Adds the full stream, with the DER certificate and chain</td></tr>
-                        <tr><td>Developer, Pro, Silver, Gold</td><td>$15 to $300 a month</td><td>Everything in Full, plus the perks listed on the sponsor page</td></tr>
+                        <tr><td>Team</td><td>$49 a month</td><td>Everything in Full, for small teams: more addresses per key, commercial use, email support</td></tr>
+                        <tr><td>Business</td><td>$149 a month</td><td>Everything in Team, for companies: the most addresses per key, priority email support</td></tr>
                     </tbody>
                 </table>
                 <div class="features-list">
@@ -209,7 +210,7 @@
                 </table>
                 <p>Keep the key private. A client that can set headers should send <code>Authorization: Bearer KEY</code> instead, which keeps the key out of URLs and proxy logs.</p>
                 <p>Each IP address can hold two connections at once. A third is refused with HTTP 429.</p>
-                <p>A key is for one customer. Each key can be used from a limited number of addresses in 24 hours: 3 on Stream, 5 on Full, more on the higher tiers. Sharing or reselling a key is not allowed, and a key that is shared gets revoked.</p>
+                <p>A key is for one customer. Each key can be used from a limited number of addresses in 24 hours: 3 on Stream, 5 on Full, 25 on Team and 100 on Business. Sharing or reselling a key is not allowed, and a key that is shared gets revoked.</p>
                 <div class="code-examples">
                     <div class="code-example">
                         <div class="code-example-header"><span class="lang">Python</span></div>
@@ -326,7 +327,7 @@ certstream.listen_for_events(on_message, url="wss://api.certstream.dev/lite?key=
                     <div class="faq-item"><h3>What is the difference between domains-only and lite?</h3><p>Domains-only sends just the domain names of each certificate, about 200 bytes per message. Lite adds the issuer, validity dates, fingerprints and log source, about 1 KB per message.</p></div>
                     <div class="faq-item"><h3>Which Certificate Transparency logs does it read?</h3><p>The Chrome- and Apple-trusted CT logs, both RFC 6962 and static-ct-api, with certificates that appear in more than one log delivered once.</p></div>
                     <div class="faq-item"><h3>Can I get the full stream with the DER certificate and chain?</h3><p>Yes, from the $10 Full tier upwards, at wss://api.certstream.dev/full-stream. You can also run your own instance of certstream-server-rust, which serves it.</p></div>
-                    <div class="faq-item"><h3>Can I share my key with my team or resell access?</h3><p>A key belongs to one customer. Each key works from a limited number of IP addresses in 24 hours (3 on Stream, 5 on Full, more on the higher tiers), so a key passed around stops working for new addresses. Sharing or reselling keys is not allowed and revokes the key. A team that needs more addresses can sponsor at a higher tier.</p></div>
+                    <div class="faq-item"><h3>Can I share my key with my team or resell access?</h3><p>A key belongs to one customer. Each key works from a limited number of IP addresses in 24 hours (3 on Stream, 5 on Full, 25 on Team, 100 on Business), so a key passed around stops working for new addresses. Sharing or reselling keys is not allowed and revokes the key. A team that needs more addresses can sponsor at the Team or Business tier.</p></div>
                     <div class="faq-item"><h3>What happens when I stop sponsoring?</h3><p>The key stops working when the paid period ends, and a new key can be generated whenever you sponsor again.</p></div>
                 </div>
                 <p>
