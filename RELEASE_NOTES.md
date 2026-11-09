@@ -1,5 +1,23 @@
 # Release Notes
 
+## v1.7.4: RFC 6962 watchers retry a get-entries range that returns 400
+
+**Release date:** November 9, 2026
+
+**What changed:** when a get-entries request returned HTTP 400, the RFC 6962 watcher moved its cursor to the current tree size and never read the rejected range. It now counts the failure, backs off (up to 60 s) and requests the same range again, as it already did for other HTTP errors. Reported in #18.
+
+**Affected:** RFC 6962 logs that answer an in-range get-entries with 400. Sectigo's logs do this intermittently when their proxy gets an error from the origin; each one skipped every entry between the watcher's position and the head.
+
+**Upgrade:** recommended for anyone monitoring Sectigo or other RFC 6962 logs.
+
+### Behaviour
+
+Every request ends below the tree size of the STH it was built from, so a 400 is a failed read of published entries, never a sign that the watcher is ahead of the log. A log that keeps returning 400 for a range now stays at that range and turns unhealthy instead of silently moving on. With `max_catchup_lag_entries` or `max_catchup_lag_secs` set, the catch-up limit can still skip past it as before. No config, metric or state-file changes.
+
+```bash
+docker pull ghcr.io/reloading01/certstream-server-rust:1.7.4
+```
+
 ## v1.7.3: Cloudflare is paced at 125 ms by default
 
 **Release date:** November 4, 2026
