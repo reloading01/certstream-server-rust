@@ -1,5 +1,16 @@
 {
   "stars": 52,
-  "container_pulls": 21602,
-  "sponsors": []
+  "container_pulls": 21659,
+  "sponsors": [
+    {
+      "login": "DavidWW",
+      "avatar": "https://avatars.githubusercontent.com/u/2619717?v=4",
+      "url": "https://github.com/DavidWW"
+    },
+    {
+      "login": "zxsnbnb666",
+      "avatar": "https://avatars.githubusercontent.com/u/287186677?v=4",
+      "url": "https://github.com/zxsnbnb666"
+    }
+  ]
 }
