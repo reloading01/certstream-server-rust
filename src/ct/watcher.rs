@@ -712,16 +712,12 @@ pub async fn run_watcher_with_cache(log: CtLog, ctx: WatcherContext) {
                             )
                             .increment(1);
                             debug!(log = %log.description, retry_after_ms, "rate limited by CT log, backing off");
-                        } else if status.as_u16() == 400 {
-                            // Entries not yet available — skip ahead to tree_size
-                            debug!(log = %log.description, start = batch_start, end = end,
-                                "entries not available (400), skipping to tree head");
-                            current_index = tree_size;
-                            sleep(poll_interval).await;
-                            break 'drain;
                         } else {
+                            // Every window ends below the STH's tree_size, so even a 400
+                            // is a failed read of published entries: retry, never skip.
                             health.record_failure(config.unhealthy_threshold);
-                            debug!(log = %log.description, status = %status, "CT log returned error");
+                            debug!(log = %log.description, status = %status,
+                                start = batch_start, end = end, "CT log returned error");
                         }
                         sleep(health.get_backoff()).await;
                         break 'drain;
