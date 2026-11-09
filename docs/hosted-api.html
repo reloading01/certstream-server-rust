@@ -116,6 +116,14 @@
         "@type": "Answer",
         "text": "The key stops working when the paid period ends, and a new key can be generated whenever you sponsor again."
       }
+    },
+    {
+      "@type": "Question",
+      "name": "Is there an uptime guarantee or a refund?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "No. The API is run on a best-effort basis with no uptime guarantee or SLA. If the service is ever shut down, this page will say so at least 30 days in advance. Payments, yearly ones included, are not refunded."
+      }
     }
   ]
 }
@@ -329,6 +337,7 @@ certstream.listen_for_events(on_message, url="wss://api.certstream.dev/lite?key=
                     <div class="faq-item"><h3>Can I get the full stream with the DER certificate and chain?</h3><p>Yes, from the $10 Full tier upwards, at wss://api.certstream.dev/full-stream. You can also run your own instance of certstream-server-rust, which serves it.</p></div>
                     <div class="faq-item"><h3>Can I share my key with my team or resell access?</h3><p>A key belongs to one customer. Each key works from a limited number of IP addresses in 24 hours (3 on Stream, 5 on Full, 25 on Team, 100 on Business), so a key passed around stops working for new addresses. Sharing or reselling keys is not allowed and revokes the key. A team that needs more addresses can sponsor at the Team or Business tier.</p></div>
                     <div class="faq-item"><h3>What happens when I stop sponsoring?</h3><p>The key stops working when the paid period ends, and a new key can be generated whenever you sponsor again.</p></div>
+                    <div class="faq-item"><h3>Is there an uptime guarantee or a refund?</h3><p>No. The API is run on a best-effort basis with no uptime guarantee or SLA. If the service is ever shut down, this page will say so at least 30 days in advance. Payments, yearly ones included, are not refunded.</p></div>
                 </div>
                 <p>
                     Want to run it yourself? See the <a href="quickstart.html">quick start</a> or the
