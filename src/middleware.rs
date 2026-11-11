@@ -130,6 +130,49 @@ pub struct ConnectionLimiter {
     fallback_config: ConnectionLimitConfig,
     total_connections: AtomicU32,
     per_ip_connections: DashMap<IpAddr, u32>,
+    per_account_connections: DashMap<String, u32>,
+}
+
+/// A cap on one account's open connections, attached by the proxy that
+/// authenticated the request. It applies whether or not the server-wide
+/// limits are enabled.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountLimit {
+    pub account: String,
+    pub max: u32,
+}
+
+impl AccountLimit {
+    pub const ACCOUNT_HEADER: &'static str = "x-certstream-account";
+    pub const MAX_HEADER: &'static str = "x-certstream-account-limit";
+
+    /// Both headers must be present and the limit a number; anything else
+    /// means the request carries no account limit.
+    pub fn from_headers(headers: &HeaderMap) -> Option<Self> {
+        let account = headers.get(Self::ACCOUNT_HEADER)?.to_str().ok()?.trim();
+        let max = headers.get(Self::MAX_HEADER)?.to_str().ok()?.trim().parse().ok()?;
+        (!account.is_empty()).then(|| Self { account: account.to_owned(), max })
+    }
+}
+
+/// Why [`ConnectionLimiter::acquire`] refused a connection.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Rejection {
+    Server,
+    Account(u32),
+}
+
+impl IntoResponse for Rejection {
+    fn into_response(self) -> Response {
+        let body = match self {
+            Self::Server => "Connection limit exceeded".to_owned(),
+            Self::Account(max) => format!(
+                "This account already has {max} open connections, the most its plan allows. \
+                 Close one, or wait up to a minute for a dropped one to time out."
+            ),
+        };
+        (StatusCode::TOO_MANY_REQUESTS, body).into_response()
+    }
 }
 
 impl ConnectionLimiter {
@@ -139,6 +182,7 @@ impl ConnectionLimiter {
             fallback_config: config,
             total_connections: AtomicU32::new(0),
             per_ip_connections: DashMap::new(),
+            per_account_connections: DashMap::new(),
         })
     }
 
@@ -156,11 +200,42 @@ impl ConnectionLimiter {
     /// fails, so a slot released at the end of the connection task leaks on
     /// every failed upgrade. Moving this guard into the callback makes the
     /// release follow the callback's lifetime instead of its execution.
-    pub fn acquire(self: &Arc<Self>, ip: IpAddr) -> Option<ConnectionGuard> {
-        self.try_acquire(ip).then(|| ConnectionGuard {
+    pub fn acquire(
+        self: &Arc<Self>,
+        ip: IpAddr,
+        account: Option<AccountLimit>,
+    ) -> Result<ConnectionGuard, Rejection> {
+        if let Some(limit) = &account {
+            let mut open = self.per_account_connections.entry(limit.account.clone()).or_insert(0);
+            if *open >= limit.max {
+                drop(open);
+                // A limit of 0 leaves the entry this call created at zero.
+                self.per_account_connections.remove_if(&limit.account, |_, open| *open == 0);
+                metrics::counter!("certstream_account_limit_rejected").increment(1);
+                return Err(Rejection::Account(limit.max));
+            }
+            *open += 1;
+        }
+        let account = account.map(|limit| limit.account);
+        if !self.try_acquire(ip) {
+            if let Some(account) = &account {
+                self.release_account(account);
+            }
+            return Err(Rejection::Server);
+        }
+        Ok(ConnectionGuard {
             limiter: Arc::clone(self),
             ip,
+            account,
         })
+    }
+
+    /// Decrements an account's count and drops the entry at zero.
+    fn release_account(&self, account: &str) {
+        self.per_account_connections.remove_if_mut(account, |_, open| {
+            *open = open.saturating_sub(1);
+            *open == 0
+        });
     }
 
     fn try_acquire(&self, ip: IpAddr) -> bool {
@@ -264,11 +339,15 @@ impl ConnectionLimiter {
 pub struct ConnectionGuard {
     limiter: Arc<ConnectionLimiter>,
     ip: IpAddr,
+    account: Option<String>,
 }
 
 impl Drop for ConnectionGuard {
     fn drop(&mut self) {
         self.limiter.release(self.ip);
+        if let Some(account) = &self.account {
+            self.limiter.release_account(account);
+        }
     }
 }
 
@@ -407,6 +486,55 @@ mod tests {
             tokens: tokens.into_iter().map(String::from).collect(),
             header_name: "Authorization".to_string(),
         }
+    }
+
+    fn account(name: &str, max: u32) -> Option<AccountLimit> {
+        Some(AccountLimit { account: name.to_owned(), max })
+    }
+
+    #[test]
+    fn account_limit_spans_addresses_and_frees_on_drop() {
+        let limiter = ConnectionLimiter::new(limiter_config(false, 0, None), None);
+
+        let first = limiter.acquire(test_ip(1), account("a", 2)).unwrap();
+        let _second = limiter.acquire(test_ip(2), account("a", 2)).unwrap();
+        assert_eq!(
+            limiter.acquire(test_ip(3), account("a", 2)).err(),
+            Some(Rejection::Account(2))
+        );
+        assert!(limiter.acquire(test_ip(3), account("b", 2)).is_ok(), "accounts are counted apart");
+        assert!(limiter.acquire(test_ip(3), None).is_ok(), "no account means no account limit");
+
+        drop(first);
+        assert!(limiter.acquire(test_ip(3), account("a", 2)).is_ok());
+    }
+
+    #[test]
+    fn a_server_rejection_gives_the_account_slot_back() {
+        let limiter = ConnectionLimiter::new(limiter_config(true, 10, Some(1)), None);
+        let _held = limiter.acquire(test_ip(1), None).unwrap();
+
+        assert_eq!(limiter.acquire(test_ip(1), account("a", 1)).err(), Some(Rejection::Server));
+        assert!(limiter.acquire(test_ip(2), account("a", 1)).is_ok());
+    }
+
+    #[test]
+    fn account_entries_are_removed_when_the_last_connection_closes() {
+        let limiter = ConnectionLimiter::new(limiter_config(false, 0, None), None);
+        drop(limiter.acquire(test_ip(1), account("a", 1)).unwrap());
+        assert!(limiter.acquire(test_ip(1), account("z", 0)).is_err());
+        assert!(limiter.per_account_connections.is_empty());
+    }
+
+    #[test]
+    fn account_limit_needs_both_headers_and_a_number() {
+        let mut headers = HeaderMap::new();
+        headers.insert(AccountLimit::ACCOUNT_HEADER, "acct".parse().unwrap());
+        assert_eq!(AccountLimit::from_headers(&headers), None);
+        headers.insert(AccountLimit::MAX_HEADER, "two".parse().unwrap());
+        assert_eq!(AccountLimit::from_headers(&headers), None);
+        headers.insert(AccountLimit::MAX_HEADER, "2".parse().unwrap());
+        assert_eq!(AccountLimit::from_headers(&headers), account("acct", 2));
     }
 
     #[test]

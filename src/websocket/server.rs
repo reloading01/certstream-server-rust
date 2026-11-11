@@ -32,7 +32,7 @@ use crate::config::StreamConfig;
 use crate::deflate::{self, DeflateHub};
 use crate::filter::{Filter, FilterHub};
 use crate::lag_policy::LagWindow;
-use crate::middleware::{ConnectionGuard, ConnectionLimiter};
+use crate::middleware::{AccountLimit, ConnectionGuard, ConnectionLimiter};
 use crate::models::PreSerializedMessage;
 
 static HEARTBEAT_JSON: &str = r#"{"message_type":"heartbeat"}"#;
@@ -228,8 +228,9 @@ fn upgrade(
         Err(rejection) => return rejection.into_response(),
     };
     let ip = addr.ip();
-    let Some(guard) = state.limiter.acquire(ip) else {
-        return (StatusCode::TOO_MANY_REQUESTS, "Connection limit exceeded").into_response();
+    let guard = match state.limiter.acquire(ip, AccountLimit::from_headers(req.headers())) {
+        Ok(guard) => guard,
+        Err(rejection) => return rejection.into_response(),
     };
     // Before the upgrade, so a rejected filter is an HTTP error the client
     // can read rather than an immediately-closed WebSocket.
@@ -619,9 +620,9 @@ mod tests {
         );
         let ip: IpAddr = "127.0.0.1".parse().unwrap();
 
-        let guard = limiter.acquire(ip).expect("first slot");
+        let guard = limiter.acquire(ip, None).expect("first slot");
         assert_eq!(limiter.current_connections(), 1);
-        assert!(limiter.acquire(ip).is_none(), "limit of 1 must be enforced");
+        assert!(limiter.acquire(ip, None).is_err(), "limit of 1 must be enforced");
 
         // What axum does to the callback when the upgrade fails.
         let callback = move |_socket: ()| async move {
@@ -634,6 +635,6 @@ mod tests {
             0,
             "an upgrade that never ran must not hold the slot"
         );
-        assert!(limiter.acquire(ip).is_some(), "slot must be reusable");
+        assert!(limiter.acquire(ip, None).is_ok(), "slot must be reusable");
     }
 }

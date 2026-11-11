@@ -1,6 +1,6 @@
 use axum::{
     extract::{ConnectInfo, Query, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::{
         sse::{Event, KeepAlive, Sse},
         IntoResponse,
@@ -16,7 +16,7 @@ use tokio_util::sync::WaitForCancellationFutureOwned;
 use tracing::{debug, info};
 
 use crate::lag_policy::LagWindow;
-use crate::middleware::ConnectionGuard;
+use crate::middleware::{AccountLimit, ConnectionGuard};
 use crate::models::PreSerializedMessage;
 
 static SSE_CONNECTION_COUNT: AtomicU64 = AtomicU64::new(0);
@@ -52,11 +52,13 @@ pub async fn handle_sse_stream(
     Query(params): Query<SseQueryParams>,
     State(state): State<Arc<crate::websocket::AppState>>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
 ) -> impl IntoResponse {
     let ip = addr.ip();
 
-    let Some(slot) = state.limiter.acquire(ip) else {
-        return (StatusCode::TOO_MANY_REQUESTS, "Connection limit exceeded").into_response();
+    let slot = match state.limiter.acquire(ip, AccountLimit::from_headers(&headers)) {
+        Ok(slot) => slot,
+        Err(rejection) => return rejection.into_response(),
     };
 
     let stream_type = SseStreamType::from_str(params.stream.as_deref().unwrap_or("lite"));

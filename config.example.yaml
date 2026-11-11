@@ -168,6 +168,9 @@ dedup:
   capacity: 1000000   # max in-flight fingerprints
   ttl_secs: 900       # 15-minute window - keep above max log MMD
 
+# An authenticating proxy can also cap one account's open streams, from any
+# address, by setting X-Certstream-Account and X-Certstream-Account-Limit on
+# the request. Make the proxy overwrite both, or clients can set their own.
 connection_limit:
   enabled: false
   max_connections: 10000
