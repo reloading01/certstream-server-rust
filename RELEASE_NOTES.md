@@ -1,5 +1,23 @@
 # Release Notes
 
+## v1.7.5: a proxy can cap one account's open streams
+
+**Release date:** November 11, 2026
+
+**What changed:** a request that carries `X-Certstream-Account` and `X-Certstream-Account-Limit` is counted against that account, across every address it connects from. Once the account holds that many WebSocket or SSE connections, the next one gets HTTP 429 with a message naming the limit. A slot frees when its connection closes, or within a minute when the client stops answering pings.
+
+**Affected:** operators who put an authenticating proxy in front of the server and want to limit customers by open connections rather than by address. Without the headers nothing changes.
+
+**Upgrade:** optional. Have the proxy set or delete both headers on every request, so clients cannot send their own; with Caddy, `forward_auth` with `copy_headers` already does this.
+
+### Behaviour
+
+The account limit applies whether or not `connection_limit` is enabled. When both apply, a connection needs a free slot in each, and a refusal by the server-wide or per-IP limit gives the account slot back. A missing header, an empty account or a limit that is not a number means no account limit. No config, metric name or state-file changes, apart from the new counter `certstream_account_limit_rejected`.
+
+```bash
+docker pull ghcr.io/reloading01/certstream-server-rust:1.7.5
+```
+
 ## v1.7.4: RFC 6962 watchers retry a get-entries range that returns 400
 
 **Release date:** November 9, 2026
