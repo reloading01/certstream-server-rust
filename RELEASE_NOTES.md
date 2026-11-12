@@ -1,5 +1,19 @@
 # Release Notes
 
+## v1.7.6: connection refusals and cuts are logged
+
+**Release date:** November 12, 2026
+
+**What changed:** three events that end or refuse a connection are now logged at `info` instead of `debug`: a refusal by the per-account limit (with the account, its limit and the client IP), a WebSocket client cut for exceeding its drop budget, and a WebSocket client dropped for missing pongs. The SSE drop-budget cut was already logged at `info`.
+
+**Affected:** operators who watch `certstream_account_limit_rejected` or `certstream_ws_disconnect_lag` and need to know which client is behind them.
+
+**Upgrade:** optional. Each event writes one line per connection. No config, metric or state-file changes.
+
+```bash
+docker pull ghcr.io/reloading01/certstream-server-rust:1.7.6
+```
+
 ## v1.7.5: a proxy can cap one account's open streams
 
 **Release date:** November 11, 2026
