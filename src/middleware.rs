@@ -212,6 +212,7 @@ impl ConnectionLimiter {
                 // A limit of 0 leaves the entry this call created at zero.
                 self.per_account_connections.remove_if(&limit.account, |_, open| *open == 0);
                 metrics::counter!("certstream_account_limit_rejected").increment(1);
+                tracing::info!(account = %limit.account, max = limit.max, ip = %ip, "account connection limit reached");
                 return Err(Rejection::Account(limit.max));
             }
             *open += 1;

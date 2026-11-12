@@ -481,7 +481,7 @@ async fn handle_socket(
 
             _ = ping_interval.tick() => {
                 if last_pong.elapsed() > pong_timeout {
-                    debug!(ip = %client_ip, "client pong timeout, disconnecting");
+                    info!(ip = %client_ip, "client pong timeout, disconnecting");
                     break;
                 }
                 if !send_with_deadline(&mut sender, Message::Ping(Bytes::new()), WRITE_TIMEOUT).await {
@@ -506,7 +506,7 @@ async fn handle_socket(
                     debug!(lagged = step.lost, ip = %client_ip, "client lagged, skipping messages");
                     metrics::counter!("certstream_ws_messages_lagged").increment(step.lost);
                     if lag_window.record(std::time::Instant::now(), step.lost) {
-                        debug!(
+                        info!(
                             ip = %client_ip,
                             dropped = lag_window.dropped_in_window(),
                             "client exceeded its drop budget, disconnecting"
