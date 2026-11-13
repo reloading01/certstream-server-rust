@@ -6,6 +6,7 @@ A Certstream server written in Rust. It monitors Certificate Transparency (CT) l
 [![Docker Hub](https://img.shields.io/badge/docker%20hub-reloading01%2Fcertstream--server--rust-blue?logo=docker)](https://hub.docker.com/r/reloading01/certstream-server-rust)
 [![Rust](https://img.shields.io/badge/rust-edition%202024-orange.svg)](https://www.rust-lang.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
+[![Sponsor](https://img.shields.io/badge/sponsor-%E2%9D%A4-ff69b4?logo=githubsponsors)](https://github.com/sponsors/reloading01)
 
 ## Overview
 
@@ -90,7 +91,7 @@ Bug reports, CT log quirks, and pull requests are welcome. See [CONTRIBUTING.md]
 
 ## Support
 
-Starring the repository or sharing it helps the project get found.
+Starring the repository or sharing it helps the project get found. You can also [sponsor it on GitHub](https://github.com/sponsors/reloading01).
 
 ## License
 
