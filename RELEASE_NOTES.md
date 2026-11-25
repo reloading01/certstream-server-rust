@@ -1,5 +1,19 @@
 # Release Notes
 
+## v1.7.7: a 256-page log no longer gets stuck on 32-entry requests
+
+**Release date:** November 25, 2026
+
+**What changed:** an RFC 6962 watcher learns where a log cuts its get-entries pages and stops each request at that boundary. One short response that ended on a multiple of 32 could lower the learned boundary of a 256-page log to 32, and it never went back up, so the watcher fetched 32 entries per request until restart. Under a per-operator rate limit that is an eighth of the throughput, and the log falls behind. After 1024 full responses the learned boundary now doubles, up to `batch_size`, so the watcher finds its way back to full pages. Reported in #19.
+
+**Affected:** RFC 6962 logs that page at 256 entries (DigiCert, Sectigo, Cloudflare), most visibly with an operator rate limit set.
+
+**Upgrade:** recommended if a DigiCert or Sectigo log has been falling behind steadily. No config, metric or state-file changes.
+
+```bash
+docker pull ghcr.io/reloading01/certstream-server-rust:1.7.7
+```
+
 ## v1.7.6: connection refusals and cuts are logged
 
 **Release date:** November 12, 2026
