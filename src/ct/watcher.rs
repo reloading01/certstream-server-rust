@@ -86,6 +86,10 @@ const FRESH_START_OVERLAP: u64 = 1000;
 /// index a response stopped at is as likely to be chance as a boundary.
 const MIN_PAGE_BOUNDARY: u64 = 32;
 
+/// Full responses after which a learned boundary is doubled, so one transient
+/// short response cannot pin a 256-page log to 32-entry requests for good.
+const REPROBE_AFTER_FULL: u32 = 1024;
+
 /// Where a log cuts get-entries pages: Sectigo, DigiCert and Cloudflare at
 /// multiples of 256, Google and TrustAsia of 32. A request that starts mid-page
 /// gets the tail only, and following tails with `adapt_window` shrinks the window.
@@ -95,6 +99,7 @@ struct PageBoundary {
     unit: u64,
     /// Boundary suggested by the previous short response, not yet confirmed.
     candidate: u64,
+    full_streak: u32,
 }
 
 impl PageBoundary {
@@ -108,7 +113,17 @@ impl PageBoundary {
         max_unit: u64,
         more_to_read: bool,
     ) -> bool {
-        if served >= requested || !more_to_read {
+        if !more_to_read {
+            return false;
+        }
+        if served >= requested {
+            if self.unit != 0 && self.unit < max_unit {
+                self.full_streak += 1;
+                if self.full_streak >= REPROBE_AFTER_FULL {
+                    self.full_streak = 0;
+                    self.unit = (self.unit * 2).min(max_unit);
+                }
+            }
             return false;
         }
         let cut = start + served;
@@ -125,6 +140,7 @@ impl PageBoundary {
             }
             (known, _) => self.unit = known.min(unit),
         }
+        self.full_streak = 0;
         true
     }
 
@@ -1088,6 +1104,22 @@ mod tests {
     }
 
     #[test]
+    fn a_256_page_log_recovers_from_one_short_response_on_a_32_multiple() {
+        let from = 583_548_672;
+        let glitch = std::cell::Cell::new(Some(from + 10 * 256 + 32));
+        let serve = |start: u64, requested: u64| match glitch.get() {
+            Some(cut) if (start..start + requested).contains(&cut) => {
+                glitch.set(None);
+                cut - start
+            }
+            _ => paged_at(256)(start, requested),
+        };
+        let (requests, boundary) = read_all(serve, from, from + 1_000_000);
+        assert_eq!(boundary.unit, 256);
+        assert!(requests < 1_000_000 / 128, "{requests} requests");
+    }
+
+    #[test]
     fn a_log_with_unaligned_pages_keeps_following_the_window() {
         let capped = |_, requested: u64| requested.min(15);
         let (requests, boundary) = read_all(capped, 1_000_003, 1_000_003 + 30_000);
@@ -1114,7 +1146,7 @@ mod tests {
 
     #[test]
     fn requests_stop_at_the_boundary_and_at_the_head() {
-        let page = PageBoundary { unit: 256, candidate: 0 };
+        let page = PageBoundary { unit: 256, ..Default::default() };
         assert_eq!(page.request_end(240, 1024, 10_000), 255);
         assert_eq!(page.request_end(256, 1024, 10_000), 511);
         assert_eq!(page.request_end(256, 100, 10_000), 355);
